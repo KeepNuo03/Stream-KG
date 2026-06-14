@@ -1,0 +1,52 @@
+"""知识图谱级联清理服务（P2）。
+
+删除文档时同步清理：
+- graph.pkl 中该文档相关节点/边；
+- 无 mention 残留的孤立实体及其 Qdrant 向量。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from stream_kg.kg.graph_store import GraphStore
+from stream_kg.storage.qdrant_store import QdrantStore
+from stream_kg.storage.sqlite_store import SQLiteStore
+
+logger = logging.getLogger(__name__)
+
+
+class KgCleanupService:
+    """文档删除后的图谱一致性维护。"""
+
+    def __init__(
+        self,
+        *,
+        sqlite_store: SQLiteStore,
+        graph_store: GraphStore,
+        qdrant_store: QdrantStore,
+    ) -> None:
+        self.sqlite_store = sqlite_store
+        self.graph_store = graph_store
+        self.qdrant_store = qdrant_store
+
+    async def cleanup_document(self, doc_id: str) -> None:
+        """按文档 ID 清理图谱、SQLite 元数据与实体向量。"""
+        chunks = await self.sqlite_store.list_chunks_by_doc(doc_id)
+        chunk_ids = [chunk.chunk_id for chunk in chunks]
+
+        await self.graph_store.initialize()
+        removed_entity_ids = await self.graph_store.remove_document(doc_id, chunk_ids=chunk_ids)
+        await self.graph_store.persist()
+
+        await self.sqlite_store.delete_document(doc_id)
+
+        orphan_ids = await self.sqlite_store.list_orphan_entity_ids()
+        to_delete = sorted(set(removed_entity_ids) | set(orphan_ids))
+        for entity_id in to_delete:
+            try:
+                await asyncio.to_thread(self.qdrant_store.delete_entity, entity_id)
+            except Exception as exc:
+                logger.warning("Failed to delete entity vector %s: %s", entity_id, exc)
+            await self.sqlite_store.delete_entity(entity_id)

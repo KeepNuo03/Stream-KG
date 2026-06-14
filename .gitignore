@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Data (runtime)
+data/uploads/
+data/parsed/
+data/qdrant/
+data/*.db
+data/*.pkl
+
+# Env
+.env
+.env.local
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Models cache
+models/
+.cache/
