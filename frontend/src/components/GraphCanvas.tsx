@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import cytoscape, { type Core, type ElementDefinition, type LayoutOptions } from "cytoscape";
+// @ts-expect-error cytoscape-fcose has no bundled types
+import fcose from "cytoscape-fcose";
+
+cytoscape.use(fcose);
 
 export type GraphCanvasNode = {
   id: string;
   label: string;
   type: string;
+  entity_type?: string;
   layer?: "L0" | "L1";
   parent_doc_id?: string | null;
   mention_count: number;
@@ -20,20 +25,40 @@ export type GraphCanvasEdge = {
   target_label?: string;
   relation_type: string;
   confidence: number;
+  evidence?: string;
 };
 
 type GraphCanvasProps = {
   nodes: GraphCanvasNode[];
   edges: GraphCanvasEdge[];
   selectedNodeId: string | null;
-  relationFilter: string;
+  relationFilters: string[];
   onSelectNode: (nodeId: string | null) => void;
+  onSelectEdge?: (edge: GraphCanvasEdge | null) => void;
+  onFocusNode?: (nodeId: string) => void;
 };
 
-const RELATION_COLORS: Record<string, string> = {
+export const ENTITY_TYPE_COLORS: Record<string, string> = {
+  person: "#ca8a04",
+  organization: "#dc2626",
+  paper: "#4338ca",
+  method: "#2563eb",
+  concept: "#0891b2",
+  dataset: "#16a34a",
+  metric: "#9333ea",
+  task: "#db2777",
+  location: "#64748b",
+  time: "#94a3b8",
+  tool: "#ea580c",
+  role: "#92400e",
+  document: "#dbeafe",
+};
+
+export const RELATION_COLORS: Record<string, string> = {
   shares_entity: "#475569",
   improves: "#16a34a",
   contradicts: "#dc2626",
+  conflict: "#dc2626",
   extends: "#2563eb",
   proposes: "#0ea5e9",
   uses: "#0d9488",
@@ -47,42 +72,59 @@ const RELATION_COLORS: Record<string, string> = {
 };
 
 const MAX_RENDER_NODES = 36;
+const LAYOUT_STORAGE_KEY = "stream-kg-layout-v1";
 
-const COSE_LAYOUT: LayoutOptions = {
-  name: "cose",
+const FCOSE_LAYOUT = {
+  name: "fcose",
+  quality: "default",
+  animate: false,
   fit: true,
   padding: 36,
-  animate: false,
+  nodeSeparation: 80,
+  packComponents: true,
   randomize: false,
-  nodeRepulsion: 9000,
-  idealEdgeLength: 90,
-  edgeElasticity: 120,
-  nestingFactor: 1.1,
-  gravity: 0.9,
-  numIter: 600,
-};
+} as LayoutOptions;
 
-function filterEdges(edges: GraphCanvasEdge[], relationFilter: string): GraphCanvasEdge[] {
-  if (relationFilter === "balanced" || relationFilter === "all") return edges;
-  if (relationFilter === "semantic") {
+function loadLayoutCache(): Map<string, { x: number; y: number }> {
+  if (typeof window === "undefined") return new Map();
+  try {
+    const raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw) as Record<string, { x: number; y: number }>;
+    return new Map(Object.entries(parsed));
+  } catch {
+    return new Map();
+  }
+}
+
+function saveLayoutCache(cache: Map<string, { x: number; y: number }>) {
+  if (typeof window === "undefined") return;
+  const obj = Object.fromEntries(cache.entries());
+  window.localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(obj));
+}
+
+function filterEdges(edges: GraphCanvasEdge[], relationFilters: string[]): GraphCanvasEdge[] {
+  if (relationFilters.length === 0 || relationFilters.includes("all")) return edges;
+  if (relationFilters.includes("balanced")) return edges;
+  if (relationFilters.includes("semantic")) {
     return edges.filter((edge) => edge.relation_type !== "mentions");
   }
-  return edges.filter((edge) => edge.relation_type === relationFilter);
+  return edges.filter((edge) => relationFilters.includes(edge.relation_type));
 }
 
 function buildVisibleGraph(
   nodes: GraphCanvasNode[],
   edges: GraphCanvasEdge[],
-  relationFilter: string
+  relationFilters: string[]
 ): { nodes: GraphCanvasNode[]; edges: GraphCanvasEdge[] } {
   const cappedNodes = nodes.slice(0, MAX_RENDER_NODES);
   const nodeIds = new Set(cappedNodes.map((node) => node.id));
-  const filteredEdges = filterEdges(edges, relationFilter).filter(
+  const filteredEdges = filterEdges(edges, relationFilters).filter(
     (edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)
   );
 
   if (filteredEdges.length === 0) {
-    return { nodes: [], edges: [] };
+    return { nodes: cappedNodes.slice(0, 12), edges: [] };
   }
 
   const connectedIds = new Set<string>();
@@ -95,28 +137,48 @@ function buildVisibleGraph(
   return { nodes: visibleNodes, edges: filteredEdges };
 }
 
+function topologyKey(nodes: GraphCanvasNode[], edges: GraphCanvasEdge[]): string {
+  const nodePart = nodes.map((n) => n.id).sort().join(",");
+  const edgePart = edges.map((e) => e.id).sort().join(",");
+  return `${nodePart}|${edgePart}`;
+}
+
 export function GraphCanvas({
   nodes,
   edges,
   selectedNodeId,
-  relationFilter,
+  relationFilters,
   onSelectNode,
+  onSelectEdge,
+  onFocusNode,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cyRef = useRef<Core | null>(null);
+  const layoutCacheRef = useRef<Map<string, { x: number; y: number }>>(loadLayoutCache());
+  const lastTopologyRef = useRef<string>("");
   const onSelectRef = useRef(onSelectNode);
+  const onSelectEdgeRef = useRef(onSelectEdge);
+  const onFocusRef = useRef(onFocusNode);
   onSelectRef.current = onSelectNode;
+  onSelectEdgeRef.current = onSelectEdge;
+  onFocusRef.current = onFocusNode;
 
-  const { nodes: visibleNodes, edges: visibleEdges } = buildVisibleGraph(nodes, edges, relationFilter);
+  const { nodes: visibleNodes, edges: visibleEdges } = useMemo(
+    () => buildVisibleGraph(nodes, edges, relationFilters),
+    [nodes, edges, relationFilters]
+  );
+  const topologyKeyValue = useMemo(
+    () => topologyKey(visibleNodes, visibleEdges),
+    [visibleNodes, visibleEdges]
+  );
+
   const [layoutReady, setLayoutReady] = useState(false);
   const isEmpty = visibleNodes.length === 0;
 
   useEffect(() => {
-    if (!containerRef.current) {
-      return;
-    }
+    if (!containerRef.current) return;
 
-    const truncateLabel = (raw: string, limit = 14): string => {
+    const truncateLabel = (raw: string, limit = 18): string => {
       const text = (raw || "").trim();
       if (!text) return "?";
       if (text.length <= limit) return text;
@@ -130,6 +192,7 @@ export function GraphCanvas({
           label: truncateLabel(node.label),
           fullLabel: node.label,
           type: node.type,
+          entityType: node.entity_type || node.type,
           layer: node.layer ?? "L1",
           mentionCount: node.mention_count,
         },
@@ -141,6 +204,7 @@ export function GraphCanvas({
           target: edge.target,
           relationType: edge.relation_type,
           confidence: edge.confidence,
+          evidence: edge.evidence || "",
         },
       })),
     ];
@@ -156,11 +220,10 @@ export function GraphCanvas({
             selector: "node",
             style: {
               label: "data(label)",
-              "background-color": "#4f46e5",
               color: "#334155",
               "font-size": 10,
               "text-wrap": "ellipsis",
-              "text-max-width": "88",
+              "text-max-width": "96",
               "text-valign": "bottom",
               "text-margin-y": 6,
               width: 22,
@@ -188,7 +251,6 @@ export function GraphCanvas({
           {
             selector: "node:selected",
             style: {
-              "background-color": "#1d4ed8",
               "border-color": "#1e3a8a",
               width: 28,
               height: 28,
@@ -209,6 +271,21 @@ export function GraphCanvas({
               "arrow-scale": 0.6,
             },
           },
+          {
+            selector: 'edge[relationType = "conflict"]',
+            style: {
+              width: 3,
+              "line-color": "#dc2626",
+              "target-arrow-color": "#dc2626",
+              opacity: 1,
+            },
+          },
+          {
+            selector: 'edge[relationType = "mentions"]',
+            style: {
+              "line-style": "dashed",
+            },
+          },
         ],
         minZoom: 0.25,
         maxZoom: 2.5,
@@ -219,23 +296,44 @@ export function GraphCanvas({
       cyRef.current.on("tap", "node", (event) => {
         onSelectRef.current(event.target.id() as string);
       });
+      cyRef.current.on("dbltap", "node", (event) => {
+        const nodeId = event.target.id() as string;
+        onFocusRef.current?.(nodeId);
+      });
+      cyRef.current.on("tap", "edge", (event) => {
+        const edge = event.target;
+        const payload: GraphCanvasEdge = {
+          id: edge.id(),
+          source: edge.data("source"),
+          target: edge.data("target"),
+          relation_type: edge.data("relationType"),
+          confidence: Number(edge.data("confidence") || 0),
+          evidence: edge.data("evidence") || "",
+        };
+        onSelectEdgeRef.current?.(payload);
+      });
       cyRef.current.on("tap", (event) => {
         if (event.target === cyRef.current) {
           onSelectRef.current(null);
+          onSelectEdgeRef.current?.(null);
         }
+      });
+      cyRef.current.on("dragfree", "node", (event) => {
+        const node = event.target;
+        layoutCacheRef.current.set(node.id(), { x: node.position("x"), y: node.position("y") });
+        saveLayoutCache(layoutCacheRef.current);
       });
     }
 
     const cy = cyRef.current;
     if (isEmpty) {
-      // 关键修复：空图切换时只清空元素，不销毁实例，避免 Cytoscape 在频繁
-      // destroy/recreate 过程中触发 DOM removeChild 竞态（Runtime NotFoundError）。
-      cy.batch(() => {
-        cy.elements().remove();
-      });
+      cy.batch(() => cy.elements().remove());
       setLayoutReady(true);
       return;
     }
+
+    const topologyChanged = topologyKeyValue !== lastTopologyRef.current;
+    lastTopologyRef.current = topologyKeyValue;
 
     cy.batch(() => {
       cy.elements().remove();
@@ -245,9 +343,16 @@ export function GraphCanvas({
     cy.nodes().forEach((node) => {
       const mentionCount = Number(node.data("mentionCount") || 1);
       const layer = String(node.data("layer") || "L1");
+      const entityType = String(node.data("entityType") || "concept");
       const size = layer === "L0" ? 34 : nodeSize(mentionCount);
-      node.style({ width: size, height: size });
+      const color = layer === "L0" ? ENTITY_TYPE_COLORS.document : ENTITY_TYPE_COLORS[entityType] || "#4f46e5";
+      node.style({ width: size, height: size, "background-color": color });
+      const cached = layoutCacheRef.current.get(node.id());
+      if (cached) {
+        node.position(cached);
+      }
     });
+
     cy.edges().forEach((edge) => {
       const relationType = String(edge.data("relationType") || "mentions");
       const confidence = Number(edge.data("confidence") || 0.6);
@@ -255,19 +360,31 @@ export function GraphCanvas({
       edge.style({
         "line-color": color,
         "target-arrow-color": color,
-        width: relationType === "mentions" ? 1 + confidence * 0.8 : 1.5 + confidence,
-        opacity: relationType === "mentions" ? 0.45 : 0.75,
+        width: relationType === "mentions" ? 1 + confidence * 0.8 : relationType === "conflict" ? 3 : 1.5 + confidence,
+        opacity: relationType === "mentions" ? 0.45 : 0.85,
       });
     });
 
+    if (!topologyChanged) {
+      cy.fit(undefined, 36);
+      setLayoutReady(true);
+      return;
+    }
+
     setLayoutReady(false);
-    const layout = cy.layout(COSE_LAYOUT);
+    const layout = cy.layout({
+      ...FCOSE_LAYOUT,
+    } as LayoutOptions);
     layout.one("layoutstop", () => {
+      cy.nodes().forEach((node) => {
+        layoutCacheRef.current.set(node.id(), { x: node.position("x"), y: node.position("y") });
+      });
+      saveLayoutCache(layoutCacheRef.current);
       cy.fit(undefined, 36);
       setLayoutReady(true);
     });
     layout.run();
-  }, [visibleNodes, visibleEdges, isEmpty]);
+  }, [topologyKeyValue, visibleNodes, visibleEdges, isEmpty]);
 
   useEffect(() => {
     const cy = cyRef.current;
@@ -286,9 +403,9 @@ export function GraphCanvas({
   }, []);
 
   const hint =
-    relationFilter === "semantic"
-      ? "当前文档几乎没有语义关系边。请切换「均衡」查看高置信 co-mention，或重新导入文档。"
-      : "没有满足质量阈值的连通关系。请切换关系类型，或删除旧文档后重新导入。";
+    relationFilters.includes("semantic")
+      ? "当前文档几乎没有语义关系边。请切换关系筛选，或重新导入文档。"
+      : "没有满足质量阈值的连通关系。请切换关系类型，或选择文档查看 ego 子图。";
 
   return (
     <div className="relative h-full min-h-[280px] w-full">

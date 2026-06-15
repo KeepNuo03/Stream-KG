@@ -84,6 +84,24 @@ async def status() -> dict[str, object]:
     }
 
 
+@router.get("/events")
+async def list_change_events(unread_only: bool = True, since: str | None = None, limit: int = 20) -> dict:
+    sqlite_store = get_sqlite_store()
+    events = await sqlite_store.list_kg_change_events(
+        unread_only=unread_only,
+        since=since,
+        limit=min(limit, 50),
+    )
+    return {"events": events}
+
+
+@router.post("/events/{event_id}/read")
+async def mark_event_read(event_id: str) -> dict:
+    sqlite_store = get_sqlite_store()
+    await sqlite_store.mark_kg_change_event_read(event_id)
+    return {"ok": True}
+
+
 @router.get("/stats")
 async def stats() -> dict[str, float | int]:
     """返回语料与会话统计（P1 最小集）。"""

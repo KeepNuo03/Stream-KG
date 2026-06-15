@@ -161,6 +161,17 @@
 
 **进度**：0/9  **Commit**：—
 
+> **2026-06-15 更新**：原 Phase C/D/E 已被「双画布 MVP 重构 P0–P7」吸收并完成主体交付：
+> - P0 数据 bug 修复（LLM→SQLite 同步、repair_phase_b.py、默认 LLM 路径）✅
+> - P1 思维导图（markmap + `/documents/{id}/mindmap`）✅
+> - P2 KG 重做（fcose + layout cache + ego + 12 类配色 + GraphToolbar/Legend）✅
+> - P3 点击边 LLM 解释 ✅
+> - P4 聊天引用 PDF 跳转（react-pdf + 已有 `/documents/{id}/file`）✅
+> - P5 增量 Toast（kg_change_events + 5s 轮询）✅
+> - P6 冲突检测（LLM pairwise + conflict 边）✅
+> - P7 单测 + 文档（R-027/028/029）✅
+> 仍待后续：compound 父节点、hover 高亮邻居、PNG/SVG 导出、vector alias 合并（原 C.5）
+
 ---
 
 ## 6. Phase E · 监控 + 错误处理（0.5d）

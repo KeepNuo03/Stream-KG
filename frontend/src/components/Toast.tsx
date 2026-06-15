@@ -10,10 +10,17 @@ type ToastItem = {
   kind: ToastKind;
   message: string;
   detail?: string;
+  onClick?: () => void;
 };
 
 type ToastApi = {
-  show: (input: { kind?: ToastKind; message: string; detail?: string; ttlMs?: number }) => void;
+  show: (input: {
+    kind?: ToastKind;
+    message: string;
+    detail?: string;
+    ttlMs?: number;
+    onClick?: () => void;
+  }) => void;
 };
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -41,9 +48,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const api = useMemo<ToastApi>(
     () => ({
-      show: ({ kind = "info", message, detail, ttlMs = 4000 }) => {
+      show: ({ kind = "info", message, detail, ttlMs = 4000, onClick }) => {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        setItems((prev) => [...prev, { id, kind, message, detail }]);
+        setItems((prev) => [...prev, { id, kind, message, detail, onClick }]);
         if (ttlMs > 0) {
           window.setTimeout(() => dismiss(id), ttlMs);
         }
@@ -59,7 +66,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {items.map((it) => (
           <div
             key={it.id}
-            className={`pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-xl border px-4 py-2.5 shadow-lg ${toneByKind[it.kind]}`}
+            className={`pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-xl border px-4 py-2.5 shadow-lg ${toneByKind[it.kind]} ${it.onClick ? "cursor-pointer" : ""}`}
+            onClick={() => {
+              it.onClick?.();
+              dismiss(it.id);
+            }}
           >
             <span className="mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full border border-current text-xs font-bold">
               {iconByKind[it.kind]}

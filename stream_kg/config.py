@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     # 用户通过 POST /api/v1/documents/{doc_id}/extract-kg 显式触发时**强制用 LLM**，
     # 不受此开关约束（手动触发即明确意图）。
     # 把此项设为 True 时：feature_kg_enabled=True 的上传流程会自动走 LLM 抽取（耗钱，慎开）。
-    feature_kg_use_llm: bool = False
+    feature_kg_use_llm: bool = True
     # 单个文档内并发抽取的 chunk 数（asyncio.Semaphore）。E5 决策：5 起步。
     kg_extraction_concurrency: int = 5
     # 单 chunk 抽取失败重试次数（13 文档 §2.5）。

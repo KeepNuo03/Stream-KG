@@ -20,7 +20,11 @@ import {
   Upload,
 } from "lucide-react";
 
-import { GraphCanvas } from "@/components/GraphCanvas";
+import { GraphCanvas, type GraphCanvasEdge } from "@/components/GraphCanvas";
+import { GraphLegend } from "@/components/GraphLegend";
+import { GraphToolbar } from "@/components/GraphToolbar";
+import { MindMapCanvas } from "@/components/MindMapCanvas";
+import { PdfDrawer } from "@/components/PdfDrawer";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -299,8 +303,19 @@ export default function HomePage() {
   const [loadingGraph, setLoadingGraph] = useState(false);
   const [graphError, setGraphError] = useState<string | null>(null);
   const [graphDocFilter, setGraphDocFilter] = useState<string>("all");
-  const [relationFilter, setRelationFilter] = useState<string>("balanced");
+  const [relationFilters, setRelationFilters] = useState<string[]>(["balanced"]);
   const [graphViewMode, setGraphViewMode] = useState<"mixed" | "l1" | "l0">("mixed");
+  const [canvasTab, setCanvasTab] = useState<"mindmap" | "graph">("mindmap");
+  const [mindmapMarkdown, setMindmapMarkdown] = useState<string>("");
+  const [loadingMindmap, setLoadingMindmap] = useState(false);
+  const [focusDocId, setFocusDocId] = useState<string | null>(null);
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  const [globalGraphView, setGlobalGraphView] = useState(false);
+  const [graphSearch, setGraphSearch] = useState("");
+  const [selectedEdge, setSelectedEdge] = useState<GraphCanvasEdge | null>(null);
+  const [edgeExplanation, setEdgeExplanation] = useState<string>("");
+  const [loadingEdgeExplain, setLoadingEdgeExplain] = useState(false);
+  const [pdfDrawer, setPdfDrawer] = useState<{ docId: string; docTitle: string; pageNum: number | null } | null>(null);
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [entityDetail, setEntityDetail] = useState<EntityDetail | null>(null);
   const [loadingEntityDetail, setLoadingEntityDetail] = useState(false);
@@ -360,10 +375,16 @@ export default function HomePage() {
         limit_nodes: "36",
         min_mentions: "2",
         max_edges: "48",
-        relation_type: relationFilter,
+        relation_type: relationFilters[0] ?? "balanced",
+        hop: "1",
       });
-      if (graphDocFilter !== "all") {
-        params.set("doc_id", graphDocFilter);
+      if (!globalGraphView && focusDocId) {
+        params.set("focus_doc_id", focusDocId);
+      } else if (graphDocFilter !== "all") {
+        params.set("focus_doc_id", graphDocFilter);
+      }
+      if (focusNodeId) {
+        params.set("focus_node_id", focusNodeId);
       }
       const res = await fetch(`${API_BASE}/graph?${params.toString()}`);
       if (!res.ok) {
@@ -380,7 +401,48 @@ export default function HomePage() {
         setLoadingGraph(false);
       }
     }
-  }, [graphDocFilter, relationFilter, graphViewMode]);
+  }, [graphDocFilter, relationFilters, graphViewMode, focusDocId, focusNodeId, globalGraphView]);
+
+  const fetchMindmap = useCallback(async (docId: string) => {
+    setLoadingMindmap(true);
+    try {
+      const res = await fetch(`${API_BASE}/documents/${docId}/mindmap`);
+      if (!res.ok) throw new Error(`mindmap HTTP ${res.status}`);
+      const data = (await res.json()) as { markdown?: string };
+      setMindmapMarkdown(data.markdown ?? "");
+    } catch {
+      setMindmapMarkdown("");
+    } finally {
+      setLoadingMindmap(false);
+    }
+  }, []);
+
+  const loadEdgeExplain = useCallback(async (edge: GraphCanvasEdge) => {
+    setSelectedEdge(edge);
+    setLoadingEdgeExplain(true);
+    setEdgeExplanation("");
+    try {
+      const res = await fetch(`${API_BASE}/graph/edges/explain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          head_id: edge.source,
+          tail_id: edge.target,
+          relation_type: edge.relation_type,
+          evidence: edge.evidence ?? "",
+          head_label: edge.source_label ?? "",
+          tail_label: edge.target_label ?? "",
+        }),
+      });
+      if (!res.ok) throw new Error(`explain HTTP ${res.status}`);
+      const data = (await res.json()) as { explanation?: string };
+      setEdgeExplanation(data.explanation ?? "");
+    } catch {
+      setEdgeExplanation("无法生成关系解释");
+    } finally {
+      setLoadingEdgeExplain(false);
+    }
+  }, []);
 
   const loadEntityDetail = useCallback(async (entityId: string | null) => {
     setSelectedEntityId(entityId);
@@ -408,6 +470,14 @@ export default function HomePage() {
     setCitationDetail(null);
     setCitationDetailError(null);
     setLoadingCitationDetail(true);
+    const doc = documents.find((d) => d.doc_id === citation.doc_id);
+    if (doc?.doc_type === "pdf") {
+      setPdfDrawer({
+        docId: citation.doc_id,
+        docTitle: citation.doc_title,
+        pageNum: citation.page_num,
+      });
+    }
     try {
       const res = await fetch(
         `${API_BASE}/documents/${citation.doc_id}/chunks/${citation.chunk_id}`
@@ -422,7 +492,7 @@ export default function HomePage() {
     } finally {
       setLoadingCitationDetail(false);
     }
-  }, []);
+  }, [documents]);
 
   const closeCitation = useCallback(() => {
     setActiveCitation(null);
@@ -818,6 +888,66 @@ export default function HomePage() {
   }, [refreshGraph]);
 
   useEffect(() => {
+    const anchorDoc =
+      graphDocFilter !== "all"
+        ? graphDocFilter
+        : selectedDocIds.size === 1
+          ? ([...selectedDocIds][0] ?? null)
+          : null;
+    setFocusDocId(anchorDoc);
+    if (anchorDoc) {
+      void fetchMindmap(anchorDoc);
+    } else {
+      setMindmapMarkdown("");
+    }
+  }, [graphDocFilter, selectedDocIds, fetchMindmap]);
+
+  useEffect(() => {
+    const pollEvents = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/events?unread_only=true&limit=10`);
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          events?: Array<{
+            event_id: string;
+            event_type: string;
+            head_id?: string;
+            tail_id?: string;
+            relation_type?: string;
+            evidence?: string;
+            doc_id?: string;
+          }>;
+        };
+        for (const event of data.events ?? []) {
+          toast.show({
+            kind: event.event_type === "conflict" ? "warning" : "info",
+            message:
+              event.event_type === "conflict"
+                ? "检测到知识冲突"
+                : `新关联：${event.relation_type ?? "relation"}`,
+            detail: event.evidence ?? undefined,
+            ttlMs: 8000,
+            onClick: () => {
+              setCanvasTab("graph");
+              if (event.doc_id) {
+                setFocusDocId(event.doc_id);
+                setGraphDocFilter(event.doc_id);
+              }
+              if (event.head_id) setFocusNodeId(event.head_id);
+            },
+          });
+          await fetch(`${API_BASE}/events/${event.event_id}/read`, { method: "POST" });
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    void pollEvents();
+    const timer = window.setInterval(() => void pollEvents(), 5000);
+    return () => window.clearInterval(timer);
+  }, [toast]);
+
+  useEffect(() => {
     // 轮询服务健康状态，5s 一次；用于顶栏状态指示灯。
     const fetchStatus = async () => {
       try {
@@ -1058,20 +1188,52 @@ export default function HomePage() {
           <ResizeHandle />
           <Panel defaultSize="52%" minSize="30%" id="panel-graph" className="flex min-h-0">
           <section className="flex h-full min-h-0 w-full flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-slate-800">知识图谱视图</h2>
+            <div className="mb-3 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <span className="rounded-full bg-indigo-100 px-2 py-1 text-xs font-medium text-indigo-700">Phase 2</span>
+                <h2 className="text-sm font-semibold text-slate-800">画布</h2>
+                <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs">
+                  <button
+                    type="button"
+                    className={`rounded-md px-2 py-1 ${canvasTab === "mindmap" ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600"}`}
+                    onClick={() => setCanvasTab("mindmap")}
+                  >
+                    思维导图
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-md px-2 py-1 ${canvasTab === "graph" ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600"}`}
+                    onClick={() => setCanvasTab("graph")}
+                  >
+                    知识图谱
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
                 <button
                   className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-100 disabled:opacity-50"
-                  onClick={() => void refreshGraph()}
-                  disabled={loadingGraph}
+                  onClick={() => {
+                    if (focusDocId) void fetchMindmap(focusDocId);
+                    void refreshGraph();
+                  }}
+                  disabled={loadingGraph || loadingMindmap}
                 >
-                  {loadingGraph ? "刷新中..." : "刷新图谱"}
+                  {loadingGraph || loadingMindmap ? "刷新中..." : "刷新"}
                 </button>
               </div>
             </div>
-            {graphError ? (
+            {canvasTab === "mindmap" ? (
+              <div className="flex min-h-0 flex-1 flex-col gap-2">
+                {!focusDocId ? (
+                  <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-500">
+                    请在左侧选择或筛选一篇文档，查看思维导图
+                  </div>
+                ) : loadingMindmap ? (
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">思维导图生成中…</div>
+                ) : (
+                  <MindMapCanvas markdown={mindmapMarkdown} />
+                )}
+              </div>
+            ) : graphError ? (
               <div className="flex min-h-0 flex-1 items-center justify-center rounded-2xl border border-rose-200 bg-rose-50 p-6 text-center text-sm text-rose-600">
                 <div>
                   <p className="font-medium">图谱加载失败</p>
@@ -1096,6 +1258,18 @@ export default function HomePage() {
               </div>
             ) : (
               <div className="flex min-h-0 flex-1 flex-col gap-3">
+                <GraphToolbar
+                  selected={relationFilters}
+                  onChange={setRelationFilters}
+                  searchQuery={graphSearch}
+                  onSearchChange={setGraphSearch}
+                  onSearchSubmit={() => {
+                    const target = graphData?.nodes.find((n) =>
+                      n.label.toLowerCase().includes(graphSearch.toLowerCase())
+                    );
+                    if (target) void loadEntityDetail(target.id);
+                  }}
+                />
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <label className="inline-flex items-center gap-1 text-slate-600">
                     文档
@@ -1126,28 +1300,16 @@ export default function HomePage() {
                       <option value="l0">文档视图（L0）</option>
                     </select>
                   </label>
-                  <label className="inline-flex items-center gap-1 text-slate-600">
-                    关系
-                    <select
-                      className="rounded-lg border border-slate-300 bg-white px-2 py-1"
-                      value={relationFilter}
-                      onChange={(e) => setRelationFilter(e.target.value)}
-                    >
-                      <option value="balanced">均衡（推荐）</option>
-                      <option value="semantic">仅语义关系</option>
-                      <option value="all">全部关系</option>
-                      <option value="mentions">mentions</option>
-                      <option value="improves">improves</option>
-                      <option value="contradicts">contradicts</option>
-                      <option value="extends">extends</option>
-                      <option value="surveys">surveys</option>
-                    </select>
-                  </label>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50"
+                    onClick={() => setGlobalGraphView((v) => !v)}
+                  >
+                    {globalGraphView ? "切到文档锚定" : "切到全局视图"}
+                  </button>
                   <span className="text-slate-500">
                     节点 {graphData.stats.node_count} · 边 {graphData.stats.edge_count}
-                    {graphViewMode === "mixed" ? " · 双层混合" : graphViewMode === "l0" ? " · 文档层" : " · 实体层"}
-                    {relationFilter === "semantic" ? " · 仅语义边" : ""}
-                    {relationFilter === "balanced" ? " · 连通子图 · 术语优先" : ""}
+                    {focusDocId && !globalGraphView ? ` · 锚定 ${focusDocId.slice(0, 8)}…` : ""}
                   </span>
                 </div>
                 <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
@@ -1155,16 +1317,47 @@ export default function HomePage() {
                     nodes={graphData.nodes}
                     edges={graphData.edges}
                     selectedNodeId={selectedEntityId}
-                    relationFilter={relationFilter}
+                    relationFilters={relationFilters}
                     onSelectNode={(nodeId) => void loadEntityDetail(nodeId)}
+                    onSelectEdge={(edge) => {
+                      if (edge) void loadEdgeExplain(edge);
+                      else {
+                        setSelectedEdge(null);
+                        setEdgeExplanation("");
+                      }
+                    }}
+                    onFocusNode={(nodeId) => {
+                      setFocusNodeId(nodeId);
+                      void loadEntityDetail(nodeId);
+                    }}
                   />
-                  <div className="min-h-0 rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-xs">
-                    <div className="mb-2 font-medium text-slate-700">实体详情</div>
-                    {!selectedEntityId ? (
-                      <p className="text-slate-500">点击节点查看 mentions 与关系</p>
-                    ) : loadingEntityDetail ? (
-                      <p className="text-slate-500">加载中...</p>
-                    ) : entityDetail ? (
+                  <div className="flex min-h-0 flex-col gap-2">
+                    <div className="min-h-0 flex-1 rounded-xl border border-slate-200 bg-slate-50/70 p-3 text-xs">
+                      <div className="mb-2 font-medium text-slate-700">
+                        {selectedEdge ? "关系解释" : "实体详情"}
+                      </div>
+                      {selectedEdge ? (
+                        loadingEdgeExplain ? (
+                          <p className="text-slate-500">解释生成中…</p>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="font-medium text-slate-700">
+                              {selectedEdge.source_label || selectedEdge.source} → {selectedEdge.relation_type} →{" "}
+                              {selectedEdge.target_label || selectedEdge.target}
+                            </div>
+                            <p className="leading-relaxed text-slate-600">{edgeExplanation || "暂无解释"}</p>
+                            {selectedEdge.relation_type === "conflict" && selectedEdge.evidence && (
+                              <div className="rounded border border-rose-200 bg-rose-50 p-2 text-[11px] text-rose-700">
+                                {selectedEdge.evidence}
+                              </div>
+                            )}
+                          </div>
+                        )
+                      ) : !selectedEntityId ? (
+                        <p className="text-slate-500">点击节点或边查看详情</p>
+                      ) : loadingEntityDetail ? (
+                        <p className="text-slate-500">加载中...</p>
+                      ) : entityDetail ? (
                       <div className="space-y-2">
                         <div>
                           <div className="text-sm font-semibold text-slate-800">{entityDetail.label}</div>
@@ -1200,6 +1393,8 @@ export default function HomePage() {
                     ) : (
                       <p className="text-slate-500">无法加载实体详情</p>
                     )}
+                    </div>
+                    <GraphLegend />
                   </div>
                 </div>
               </div>
@@ -1345,6 +1540,15 @@ export default function HomePage() {
           </Panel>
         </PanelGroup>
       </div>
+      {pdfDrawer && (
+        <PdfDrawer
+          docId={pdfDrawer.docId}
+          docTitle={pdfDrawer.docTitle}
+          pageNum={pdfDrawer.pageNum}
+          open={Boolean(pdfDrawer)}
+          onClose={() => setPdfDrawer(null)}
+        />
+      )}
       {activeCitation && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 px-4"

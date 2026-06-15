@@ -246,6 +246,55 @@ class SQLiteStore:
             if "llm_confidence" not in edge_cols:
                 await db.execute("ALTER TABLE temporal_edges ADD COLUMN llm_confidence REAL")
 
+            # P3-X · 双画布 MVP：思维导图 / 边解释 / 变更事件 / 冲突
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS document_mindmaps (
+                    doc_id          TEXT PRIMARY KEY REFERENCES documents(doc_id) ON DELETE CASCADE,
+                    markdown        TEXT NOT NULL,
+                    generated_at    TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS kg_edge_explanations (
+                    edge_key        TEXT PRIMARY KEY,
+                    head_id         TEXT NOT NULL,
+                    tail_id         TEXT NOT NULL,
+                    relation_type   TEXT NOT NULL,
+                    explanation     TEXT NOT NULL,
+                    evidence_json   TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS kg_change_events (
+                    event_id        TEXT PRIMARY KEY,
+                    event_type      TEXT NOT NULL,
+                    head_id         TEXT,
+                    tail_id         TEXT,
+                    relation_type   TEXT,
+                    evidence        TEXT,
+                    doc_id          TEXT,
+                    payload_json    TEXT NOT NULL DEFAULT '{}',
+                    created_at      TEXT NOT NULL,
+                    read_at         TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_change_events_unread
+                    ON kg_change_events(read_at, created_at);
+
+                CREATE TABLE IF NOT EXISTS kg_conflicts (
+                    conflict_id     TEXT PRIMARY KEY,
+                    head_id         TEXT NOT NULL,
+                    tail_id         TEXT NOT NULL,
+                    evidence_a      TEXT NOT NULL,
+                    evidence_b      TEXT NOT NULL,
+                    doc_a           TEXT NOT NULL,
+                    doc_b           TEXT NOT NULL,
+                    llm_judgment    TEXT NOT NULL,
+                    confidence      REAL NOT NULL,
+                    created_at      TEXT NOT NULL
+                );
+                """
+            )
+
             await db.commit()
 
     async def create_document(
@@ -916,3 +965,213 @@ class SQLiteStore:
                 "total_relations": 0,
             }
         return dict(row)
+
+    # ==========================================================================
+    # 双画布 MVP：思维导图 / 边解释 / 变更事件 / 冲突
+    # ==========================================================================
+
+    async def get_document_mindmap(self, doc_id: str) -> dict[str, Any] | None:
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT doc_id, markdown, generated_at FROM document_mindmaps WHERE doc_id = ?",
+                (doc_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_document_mindmap(self, *, doc_id: str, markdown: str) -> None:
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT INTO document_mindmaps(doc_id, markdown, generated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(doc_id) DO UPDATE SET
+                    markdown = excluded.markdown,
+                    generated_at = excluded.generated_at
+                """,
+                (doc_id, markdown, _iso_now()),
+            )
+            await db.commit()
+
+    async def get_edge_explanation(self, edge_key: str) -> dict[str, Any] | None:
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT edge_key, head_id, tail_id, relation_type, explanation, evidence_json, created_at
+                FROM kg_edge_explanations WHERE edge_key = ?
+                """,
+                (edge_key,),
+            ) as cur:
+                row = await cur.fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        try:
+            data["evidence_chunks"] = json.loads(data.pop("evidence_json") or "[]")
+        except json.JSONDecodeError:
+            data["evidence_chunks"] = []
+        return data
+
+    async def upsert_edge_explanation(
+        self,
+        *,
+        edge_key: str,
+        head_id: str,
+        tail_id: str,
+        relation_type: str,
+        explanation: str,
+        evidence_chunks: list[str] | None = None,
+    ) -> None:
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT INTO kg_edge_explanations(
+                    edge_key, head_id, tail_id, relation_type, explanation, evidence_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(edge_key) DO UPDATE SET
+                    explanation = excluded.explanation,
+                    evidence_json = excluded.evidence_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    edge_key,
+                    head_id,
+                    tail_id,
+                    relation_type,
+                    explanation,
+                    json.dumps(evidence_chunks or [], ensure_ascii=False),
+                    _iso_now(),
+                ),
+            )
+            await db.commit()
+
+    async def insert_kg_change_event(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        head_id: str | None = None,
+        tail_id: str | None = None,
+        relation_type: str | None = None,
+        evidence: str | None = None,
+        doc_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT INTO kg_change_events(
+                    event_id, event_type, head_id, tail_id, relation_type,
+                    evidence, doc_id, payload_json, created_at, read_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    event_id,
+                    event_type,
+                    head_id,
+                    tail_id,
+                    relation_type,
+                    evidence,
+                    doc_id,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    _iso_now(),
+                ),
+            )
+            await db.commit()
+
+    async def list_kg_change_events(
+        self,
+        *,
+        unread_only: bool = False,
+        since: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if unread_only:
+            clauses.append("read_at IS NULL")
+        if since:
+            clauses.append("created_at > ?")
+            args.append(since)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT event_id, event_type, head_id, tail_id, relation_type,
+                       evidence, doc_id, payload_json, created_at, read_at
+                FROM kg_change_events
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                tuple(args + [limit]),
+            )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.pop("payload_json") or "{}")
+            except json.JSONDecodeError:
+                item["payload"] = {}
+            result.append(item)
+        return result
+
+    async def mark_kg_change_event_read(self, event_id: str) -> None:
+        async with self._connection() as db:
+            await db.execute(
+                "UPDATE kg_change_events SET read_at = ? WHERE event_id = ?",
+                (_iso_now(), event_id),
+            )
+            await db.commit()
+
+    async def insert_kg_conflict(
+        self,
+        *,
+        conflict_id: str,
+        head_id: str,
+        tail_id: str,
+        evidence_a: str,
+        evidence_b: str,
+        doc_a: str,
+        doc_b: str,
+        llm_judgment: str,
+        confidence: float,
+    ) -> None:
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO kg_conflicts(
+                    conflict_id, head_id, tail_id, evidence_a, evidence_b,
+                    doc_a, doc_b, llm_judgment, confidence, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conflict_id,
+                    head_id,
+                    tail_id,
+                    evidence_a,
+                    evidence_b,
+                    doc_a,
+                    doc_b,
+                    llm_judgment,
+                    confidence,
+                    _iso_now(),
+                ),
+            )
+            await db.commit()
+
+    async def get_kg_conflict(self, conflict_id: str) -> dict[str, Any] | None:
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM kg_conflicts WHERE conflict_id = ?",
+                (conflict_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        return dict(row) if row else None

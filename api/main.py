@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.dependencies import get_embedder, get_qdrant_store, get_sqlite_store
-from api.routes import chat, documents, graph, system
+from api.routes import chat, documents, graph, mindmap, system
 from stream_kg.config import settings
 from stream_kg.logging import setup_logging
 
@@ -31,6 +31,7 @@ app.add_middleware(
 
 app.include_router(system.router, prefix="/api/v1", tags=["system"])
 app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])
+app.include_router(mindmap.router, prefix="/api/v1/documents", tags=["mindmap"])
 app.include_router(graph.router, prefix="/api/v1/graph", tags=["graph"])
 app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
 

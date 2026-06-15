@@ -33,10 +33,12 @@ from stream_kg.ingestion.web_parser import WebParser
 from stream_kg.kg.candidate_retrieval import CandidateRetrieval
 from stream_kg.kg.graph_store import GraphStore
 from stream_kg.kg.graph_update import GraphUpdateService
+from stream_kg.kg.change_diff import diff_edge_snapshots, persist_new_edge_events, snapshot_graph_edges
+from stream_kg.kg.conflict_detector import ConflictDetector
 from stream_kg.kg.llm_models import LlmRelation
 from stream_kg.kg.online_resolve import OnlineResolver
 from stream_kg.kg.temporal_extract import TemporalExtractor
-from stream_kg.kg.models import ResolveResult
+from stream_kg.kg.models import EntityMention, ResolveResult, TemporalEdge, new_mention_id
 from stream_kg.storage.qdrant_store import QdrantStore
 from stream_kg.storage.sqlite_store import SQLiteStore
 
@@ -148,11 +150,14 @@ class IngestPipeline:
             if settings.feature_kg_enabled:
                 kg_started = time.perf_counter()
                 if settings.feature_kg_use_llm:
-                    # Phase A.7：LLM 路径只写 kg_extraction_logs + 更 doc.kg_status，
-                    # 不上图（Phase B 接图谱写入）。
-                    await self.run_llm_extraction(doc_id=doc_id)
+                    llm_summary = await self.run_llm_extraction(doc_id=doc_id)
+                    if llm_summary.get("total", 0) > 0 and llm_summary.get("ok", 0) == 0:
+                        logger.warning(
+                            "Ingest %s: LLM extraction all failed, falling back to rule path",
+                            doc_id,
+                        )
+                        await self._run_incremental_kg(chunks=chunks)
                 else:
-                    # 旧规则路径：保留 incremental_kg 行为不变（E1 fallback）。
                     await self._run_incremental_kg(chunks=chunks)
                 logger.info("Ingest %s kg done in %.2fs", doc_id, time.perf_counter() - kg_started)
 
@@ -300,6 +305,8 @@ class IngestPipeline:
             doc_type=document.doc_type,
             title=document.title,
         )
+        await self.graph_store.initialize()
+        before_edges = snapshot_graph_edges(self.graph_store._require_graph())  # noqa: SLF001
         for result in summary.results:
             await self.sqlite_store.insert_kg_extraction_log(
                 log_id=str(uuid4()),
@@ -364,6 +371,19 @@ class IngestPipeline:
                     first_chunk_id=result.chunk_id,
                     salience=ent.salience,
                 )
+                await self.sqlite_store.insert_entity_mention(
+                    EntityMention(
+                        mention_id=new_mention_id(),
+                        doc_id=doc_id,
+                        chunk_id=result.chunk_id,
+                        surface_form=ent.name,
+                        entity_type=ent.type,
+                        char_start=0,
+                        char_end=len(ent.name),
+                        context_snippet=(ent.description or ent.name)[:240],
+                        entity_id=entity_id,
+                    )
+                )
             # 2) relations（L1-L1）
             for rel in result.extraction.relations:
                 await self._upsert_llm_relation_edge(
@@ -376,6 +396,20 @@ class IngestPipeline:
         all_links = await self.sqlite_store.list_doc_entity_links()
         await self.graph_store.build_cross_doc_edges(doc_entity_links=all_links)
         await self.graph_store.persist()
+
+        after_edges = snapshot_graph_edges(self.graph_store._require_graph())  # noqa: SLF001
+        new_edges = diff_edge_snapshots(before_edges, after_edges)
+        await persist_new_edge_events(
+            sqlite_store=self.sqlite_store,
+            graph=self.graph_store._require_graph(),  # noqa: SLF001
+            new_edges=new_edges,
+            doc_id=doc_id,
+        )
+        conflict_detector = ConflictDetector(
+            sqlite_store=self.sqlite_store,
+            graph_store=self.graph_store,
+        )
+        await conflict_detector.scan_after_ingest(doc_id=doc_id)
 
         # 终态
         if summary.ok_chunks == 0:
@@ -428,3 +462,15 @@ class IngestPipeline:
             evidence=rel.evidence,
             evidence_chunk_id=chunk_id,
         )
+        from datetime import UTC, datetime
+
+        edge = TemporalEdge(
+            edge_id=f"{head_id}->{tail_id}::{rel.relation}",
+            head_entity_id=head_id,
+            tail_entity_id=tail_id,
+            relation_type=rel.relation,
+            confidence=rel.confidence,
+            evidence_chunk_id=chunk_id,
+            created_at=datetime.now(UTC),
+        )
+        await self.sqlite_store.upsert_temporal_edge(edge)

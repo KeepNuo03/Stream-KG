@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import networkx as nx
 import pytest
 
 from stream_kg.encoding.llm_extractor import (
@@ -43,6 +44,9 @@ def fake_llm_extractor() -> AsyncMock:
 def pipeline(store: SQLiteStore, fake_llm_extractor: AsyncMock) -> IngestPipeline:
     """构造 IngestPipeline，依赖 sqlite_store 真实 + 其他 mock。"""
     graph_store = MagicMock()
+    graph_store._graph = nx.MultiDiGraph()
+    graph_store.initialize = AsyncMock()
+    graph_store._require_graph = MagicMock(return_value=graph_store._graph)
     graph_store.upsert_document_node = AsyncMock()
     graph_store.upsert_entity_node = AsyncMock()
     graph_store.upsert_doc_entity_link = AsyncMock()

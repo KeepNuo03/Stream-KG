@@ -274,6 +274,9 @@ class GraphStore:
         self,
         *,
         doc_id: str | None = None,
+        focus_doc_id: str | None = None,
+        focus_node_id: str | None = None,
+        hop: int = 1,
         view_mode: str = "mixed",
         limit_nodes: int = 36,
         min_mentions: int = 2,
@@ -286,6 +289,7 @@ class GraphStore:
         - view_mode='l1': 仅实体网（兼容旧逻辑）
         - view_mode='l0': 仅文档网（cross-doc 边）
         - view_mode='mixed': 文档+实体混合视图（L0-L1-L1）
+        - focus_doc_id / focus_node_id: ego 子图锚点
         """
         if view_mode not in {"l0", "l1", "mixed"}:
             view_mode = "mixed"
@@ -293,7 +297,24 @@ class GraphStore:
         async with self._lock:
             await self._reload_from_disk_if_stale()
             graph = self._require_graph()
-            if view_mode == "l1":
+
+            ego_focus = focus_node_id
+            if not ego_focus and focus_doc_id:
+                ego_focus = f"doc::{focus_doc_id}"
+
+            if ego_focus and ego_focus in graph.nodes:
+                nodes, edges, stats = self._export_ego_subgraph(
+                    graph=graph,
+                    focus_node_id=ego_focus,
+                    hop=max(hop, 1),
+                    view_mode=view_mode,
+                    limit_nodes=limit_nodes,
+                    min_mentions=min_mentions,
+                    relation_type=relation_type,
+                    filter_noise=filter_noise,
+                    max_edges=max_edges,
+                )
+            elif view_mode == "l1":
                 nodes, edges, stats = self._export_l1(
                     graph=graph,
                     doc_id=doc_id,
@@ -680,6 +701,7 @@ class GraphStore:
                 "relation_type": rel,
                 "confidence": confidence,
                 "evidence_chunk_id": str(data.get("evidence_chunk_id") or ""),
+                "evidence": str(data.get("evidence") or ""),
             }
             if rel == "mentions":
                 if confidence < min_mentions_conf:
@@ -698,6 +720,23 @@ class GraphStore:
             selected_edges = semantic[:max_edges]
         elif relation_type == "mentions":
             selected_edges = mentions[:max_edges]
+        elif relation_type in {
+            "improves",
+            "contradicts",
+            "extends",
+            "proposes",
+            "uses",
+            "evaluates_on",
+            "affiliated_with",
+            "authors",
+            "part_of",
+            "co_occurs",
+            "conflict",
+            "surveys",
+        }:
+            selected_edges = [
+                edge for edge in semantic if edge["relation_type"] == relation_type
+            ][:max_edges]
         else:
             selected_edges = list(semantic)
             for edge in mentions:
@@ -776,10 +815,103 @@ class GraphStore:
             node_ids,
             key=lambda node_id: (
                 degree.get(node_id, 0),
+                float(graph.nodes[node_id].get("salience") or 0.0),
                 int(graph.nodes[node_id].get("mention_count") or 0),
             ),
             reverse=True,
         )
+
+    def _collect_ego_nodes(
+        self,
+        graph: nx.MultiDiGraph,
+        focus_node_id: str,
+        hop: int,
+    ) -> set[str]:
+        if focus_node_id not in graph.nodes:
+            return {focus_node_id}
+        visited: set[str] = {focus_node_id}
+        frontier: set[str] = {focus_node_id}
+        for _ in range(hop):
+            nxt: set[str] = set()
+            for node_id in frontier:
+                for nbr in list(graph.predecessors(node_id)) + list(graph.successors(node_id)):
+                    if nbr not in visited:
+                        visited.add(nbr)
+                        nxt.add(nbr)
+            frontier = nxt
+            if not frontier:
+                break
+        return visited
+
+    def _export_ego_subgraph(
+        self,
+        *,
+        graph: nx.MultiDiGraph,
+        focus_node_id: str,
+        hop: int,
+        view_mode: str,
+        limit_nodes: int,
+        min_mentions: int,
+        relation_type: str | None,
+        filter_noise: bool,
+        max_edges: int,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        ego_nodes = self._collect_ego_nodes(graph, focus_node_id, hop)
+        if view_mode == "l0":
+            ego_nodes = {nid for nid in ego_nodes if graph.nodes.get(nid, {}).get("layer") == "L0"}
+        elif view_mode == "l1":
+            ego_nodes = {
+                nid
+                for nid in ego_nodes
+                if str(graph.nodes.get(nid, {}).get("layer") or "L1") != "L0"
+            }
+
+        pool = set(ego_nodes)
+        if filter_noise:
+            pool = {
+                node_id
+                for node_id in pool
+                if graph.nodes[node_id].get("layer") == "L0"
+                or is_meaningful_graph_label(str(graph.nodes[node_id].get("label") or node_id))
+            }
+
+        label_by_id = {node_id: str(graph.nodes[node_id].get("label") or node_id) for node_id in pool}
+        selected_ids, selected_edges = self._build_connected_export(
+            graph=graph,
+            pool=pool,
+            label_by_id=label_by_id,
+            relation_type=relation_type or "balanced",
+            max_edges=max_edges,
+            limit_nodes=limit_nodes,
+        )
+        if not selected_ids and focus_node_id in graph.nodes:
+            selected_ids = [focus_node_id]
+            if len(selected_ids) > limit_nodes:
+                selected_ids = selected_ids[:limit_nodes]
+
+        nodes = []
+        for node_id in selected_ids:
+            data = graph.nodes[node_id]
+            layer = str(data.get("layer") or ("L0" if str(node_id).startswith("doc::") else "L1"))
+            nodes.append(
+                {
+                    "id": node_id,
+                    "label": str(data.get("label") or node_id),
+                    "type": str(data.get("entity_type") or data.get("doc_type") or "entity"),
+                    "entity_type": str(data.get("entity_type") or "concept"),
+                    "layer": layer,
+                    "parent_doc_id": data.get("parent_doc_id"),
+                    "mention_count": int(data.get("mention_count") or 0),
+                    "salience": float(data.get("salience") or 0.0),
+                }
+            )
+        stats = {
+            "node_count": len(nodes),
+            "edge_count": len(selected_edges),
+            "focus_node_id": focus_node_id,
+            "hop": hop,
+        }
+        return nodes, selected_edges, stats
 
     def _ensure_parent_dir(self) -> None:
         self.graph_path.parent.mkdir(parents=True, exist_ok=True)
