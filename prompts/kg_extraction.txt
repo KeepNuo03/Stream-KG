@@ -1,0 +1,75 @@
+你是一名严谨的知识抽取专家。请从下面给出的文档片段中抽取**实体**和**关系**，输出**严格的 JSON 对象**，不要任何额外解释、注释、Markdown 围栏。
+
+# 实体类型枚举（entity.type）
+person | organization | paper | method | concept | dataset | metric | task | location | time | tool | role
+
+如果实在不属于上述类型，回落到 `concept`。
+
+# 关系类型枚举（relation）
+proposes | improves | extends | contradicts | part_of | uses | evaluates_on | affiliated_with | authors | co_occurs
+
+`co_occurs` 是兜底：当两个明显相关但无法判断更具体关系时使用。
+
+# 抽取规则
+1. 只抽对理解本文档有实质意义的实体。丢弃 "the / and / data / paper / model / result / method" 等英文泛词，以及 "我们 / 本文 / 这个 / 如下" 等中文代词；不抽长度 ≤ 2 字符的英文单词。
+2. 中英文实体都要抽，名字保留原文形式（"Transformer" 不要翻译成"变压器"）。
+3. 同一实体的不同写法放进 `aliases`（如 BERT / Bert / B.E.R.T；Vaswani et al. / Ashish Vaswani）。
+4. `salience` ∈ [0, 1] 评估该实体在本片段中的重要程度，**低于 0.4 的请直接舍弃**。
+5. 实体总数控制在 **12 个以内**，按 salience 从高到低排序。
+6. 关系必须有 `evidence` 短语（取自原文，≤ 80 字符）支撑；**没有原文证据请不要瞎编关系**。
+7. 关系的 `head` 与 `tail` **必须**出现在 `entities` 列表的 `name` 字段中。
+8. `confidence` ∈ [0, 1] 是你对这条关系成立的自评。
+
+# 输出 JSON Schema
+{
+  "entities": [
+    {
+      "name": "string",
+      "type": "person | organization | paper | method | concept | dataset | metric | task | location | time | tool | role",
+      "aliases": ["string", ...],
+      "description": "一句话描述（≤ 30 字符）",
+      "salience": 0.0
+    }
+  ],
+  "relations": [
+    {
+      "head": "string (必须 = 某个 entity.name)",
+      "relation": "proposes | improves | extends | contradicts | part_of | uses | evaluates_on | affiliated_with | authors | co_occurs",
+      "tail": "string (必须 = 某个 entity.name)",
+      "evidence": "原文短语",
+      "confidence": 0.0
+    }
+  ]
+}
+
+# 示例（Few-shot）
+INPUT:
+"""
+Vaswani et al. (2017) proposed the Transformer, a self-attention based model that outperforms recurrent networks on machine translation tasks including WMT-14 English-to-German. The model achieves a BLEU score of 28.4 on the WMT-14 dataset, surpassing prior recurrent and convolutional architectures.
+"""
+
+OUTPUT:
+{
+  "entities": [
+    {"name": "Vaswani et al.", "type": "person", "aliases": ["Ashish Vaswani"], "description": "Transformer 论文的第一作者", "salience": 0.85},
+    {"name": "Transformer", "type": "method", "aliases": ["self-attention based model"], "description": "基于自注意力的序列建模架构", "salience": 0.95},
+    {"name": "recurrent networks", "type": "method", "aliases": ["RNN"], "description": "循环神经网络", "salience": 0.55},
+    {"name": "machine translation", "type": "task", "aliases": [], "description": "机器翻译任务", "salience": 0.7},
+    {"name": "WMT-14 English-to-German", "type": "dataset", "aliases": ["WMT-14"], "description": "英德机器翻译数据集", "salience": 0.6},
+    {"name": "BLEU", "type": "metric", "aliases": [], "description": "机器翻译评估指标", "salience": 0.5}
+  ],
+  "relations": [
+    {"head": "Vaswani et al.", "relation": "proposes", "tail": "Transformer", "evidence": "Vaswani et al. (2017) proposed the Transformer", "confidence": 0.95},
+    {"head": "Transformer", "relation": "improves", "tail": "recurrent networks", "evidence": "outperforms recurrent networks", "confidence": 0.85},
+    {"head": "Transformer", "relation": "evaluates_on", "tail": "WMT-14 English-to-German", "evidence": "machine translation tasks including WMT-14", "confidence": 0.85},
+    {"head": "Transformer", "relation": "evaluates_on", "tail": "BLEU", "evidence": "achieves a BLEU score of 28.4", "confidence": 0.80}
+  ]
+}
+
+# 现在请抽取以下文档片段
+INPUT:
+"""
+{{CHUNK_TEXT}}
+"""
+
+OUTPUT:
