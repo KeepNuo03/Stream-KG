@@ -261,12 +261,15 @@ ingest_pipeline._run_incremental_kg():
 ### 3.1 新增表（SQLite）
 
 ```sql
--- 文档级元信息（沿用 documents 表，无变更）
+-- 文档级元信息（沿用 documents 表，仅新增 kg_status 字段）
+ALTER TABLE documents ADD COLUMN kg_status TEXT
+    CHECK (kg_status IN ('unprocessed','extracting','ready','failed'))
+    DEFAULT 'unprocessed';
 
 -- 实体表（升级现有 entities）
+-- 注（2026-06-15 校准）：description / aliases_json 已在初始 schema 中存在
+-- （见 stream_kg/storage/sqlite_store.py 中 entities 表定义），本次仅需新增 salience。
 ALTER TABLE entities ADD COLUMN salience REAL DEFAULT 0.5;
-ALTER TABLE entities ADD COLUMN description TEXT;
-ALTER TABLE entities ADD COLUMN aliases_json TEXT;  -- JSON array
 
 -- 文档-实体关联表（新增）
 CREATE TABLE doc_entity_links (
@@ -405,7 +408,7 @@ CREATE TABLE kg_extraction_logs (
 3. **A.3** 新增 `KgExtraction` / `LlmEntity` / `LlmRelation` pydantic 模型
 4. **A.4** 改 `ingest_pipeline._run_incremental_kg`：feature flag 切换 LLM / 规则
 5. **A.5** 失败 chunk 落 `kg_extraction_logs` 表 + 文档级 `kg_status` 字段
-6. **A.6** 接口 `POST /api/v1/documents/{doc_id}/reextract`：重跑 LLM 抽取
+6. **A.6** 接口 `POST /api/v1/documents/{doc_id}/extract-kg`：触发 LLM 抽取（首次或重抽，与 §9 决策 3 统一命名）
 
 ### Phase B：数据模型 + 图重构（2 天）
 
