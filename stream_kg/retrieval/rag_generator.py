@@ -21,6 +21,22 @@ from stream_kg.kg.models import RetrievalChunk
 from stream_kg.storage.sqlite_store import SQLiteStore
 
 
+# 系统提示词：明确角色 + 输出格式规范（Markdown / LaTeX / 代码块 / 引用）。
+# 前端用 react-markdown + remark-gfm + remark-math + rehype-katex 渲染，
+# 因此 LLM 输出应使用 Markdown 而非纯文本。
+RAG_SYSTEM_PROMPT = (
+    "你是严谨的检索增强问答助手，回答必须基于用户提供的上下文。\n"
+    "输出严格使用 Markdown 渲染（前端会自动解析），具体格式要求：\n"
+    "1. 标题用 ##（不要用一级 #，避免视觉过大）；要点用无序列表 - 或有序列表 1.；强调用 **加粗**。\n"
+    "2. 数学公式必须用 LaTeX：行内公式用 $...$（例如 $E = mc^2$、$d_k$），"
+    "块级独立公式用 $$...$$ 并独占一行；不要写裸文本如 'QK^T / √dk'。\n"
+    "3. 代码必须使用 ``` 围栏并标语言（如 ```python ... ```）；行内变量/函数名用反引号 `xxx`。\n"
+    "4. 引用编号 [1] [2] 紧跟在被支撑的结论或要点末尾，不要单独成行。\n"
+    "5. 优先用结构化呈现：先 1 句结论，再分点展开；必要时用表格 | a | b | 对比信息。\n"
+    "6. 仅当上下文与问题明显不相关时，才回答“根据已有资料无法回答”。"
+)
+
+
 class RagGenerator:
     """基于检索上下文生成“可引用”答案。"""
 
@@ -58,11 +74,8 @@ class RagGenerator:
                 chunk_text = f"{chunk_text[:max_chars]}\n...[truncated]"
             context_lines.append(f"[{idx}] ({title}, {page}) {chunk_text}")
 
+        # 这里仅传 Context + User，格式与角色约束已统一在 RAG_SYSTEM_PROMPT 中下发。
         return (
-            "你是学习助手。请优先基于提供的上下文给出有帮助的结论，"
-            "并在关键结论后标注引用编号（如[1][2]）。"
-            "只有在上下文与问题明显不相关时，才回答“根据已有资料无法回答”。"
-            "输出格式要求：先给1句结论，再分点列出（每点单独换行）。\n\n"
             f"Context:\n{chr(10).join(context_lines)}\n\n"
             f"User: {query}"
         )
@@ -136,7 +149,7 @@ class RagGenerator:
         payload = {
             "model": settings.llm_model,
             "messages": [
-                {"role": "system", "content": "你是严谨的检索增强问答助手。"},
+                {"role": "system", "content": RAG_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": settings.llm_max_tokens,
@@ -185,7 +198,7 @@ class RagGenerator:
         payload = {
             "model": settings.llm_model,
             "messages": [
-                {"role": "system", "content": "你是严谨的检索增强问答助手。"},
+                {"role": "system", "content": RAG_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": settings.llm_max_tokens,

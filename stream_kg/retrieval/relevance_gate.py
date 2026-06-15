@@ -181,7 +181,17 @@ def assess_retrieval(
             "lexical_overlap": overlap,
         }
 
-    if not broad and terms and overlap < min_lexical_overlap and hits < 2:
+    # R-021：跨语言/术语场景下，词法 overlap 天生偏低（如中文 query 问英文论文：
+    # "自注意力" 不会出现在英文 chunk 里，但 "transformer" 命中 1 个，overlap=1/6=0.17）。
+    # 当向量分明显强时，信任语义相关性，跳过严格 overlap 检查，避免词法 gate 错杀。
+    strong_vector_signal = top_score >= max(0.45, effective_min + 0.10)
+    if (
+        not broad
+        and terms
+        and overlap < min_lexical_overlap
+        and hits < 2
+        and not strong_vector_signal
+    ):
         return {
             "acceptable": False,
             "low_confidence": True,

@@ -1,8 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Group as PanelGroup,
+  Panel,
+  Separator as PanelSeparator,
+  useDefaultLayout,
+  type LayoutStorage,
+} from "react-resizable-panels";
+import {
+  ArrowUp,
+  Link as LinkIcon,
+  Loader2,
+  MoreHorizontal,
+  Plus,
+  RefreshCw,
+  RotateCw,
+  Trash2,
+  Upload,
+} from "lucide-react";
 
 import { GraphCanvas } from "@/components/GraphCanvas";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 
@@ -103,6 +122,94 @@ function localizeRelation(type: string): string {
   return relationTypeLabel[type] ?? type;
 }
 
+function ResizeHandle() {
+  return (
+    <PanelSeparator className="group relative mx-1 w-1.5 cursor-col-resize bg-transparent transition-colors hover:bg-blue-100/40 active:bg-blue-200/60">
+      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-slate-300 transition-all group-hover:w-0.5 group-hover:bg-blue-400 group-active:w-1 group-active:bg-blue-500" />
+    </PanelSeparator>
+  );
+}
+
+function DocActionsMenu({
+  doc,
+  onReprocess,
+  onDelete,
+  disabled,
+  canReprocess,
+}: {
+  doc: DocumentItem;
+  onReprocess: (doc: DocumentItem) => void;
+  onDelete: (doc: DocumentItem) => void;
+  disabled: boolean;
+  canReprocess: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        aria-label="操作"
+        className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-8 z-30 min-w-[120px] overflow-hidden rounded-xl border border-slate-200 bg-white py-1 shadow-lg ring-1 ring-black/5"
+        >
+          {canReprocess && (
+            <button
+              type="button"
+              role="menuitem"
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-slate-700 transition hover:bg-slate-100"
+              onClick={() => {
+                setOpen(false);
+                onReprocess(doc);
+              }}
+            >
+              <RotateCw className="h-3.5 w-3.5 text-blue-600" />
+              重处理
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-rose-600 transition hover:bg-rose-50"
+            onClick={() => {
+              setOpen(false);
+              onDelete(doc);
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            删除
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ServiceStatusChip({
   name,
   status,
@@ -136,8 +243,29 @@ function ServiceStatusChip({
   );
 }
 
+const NOOP_LAYOUT_STORAGE: LayoutStorage = {
+  getItem: () => null,
+  setItem: () => {},
+};
+
 export default function HomePage() {
-  // ===== 页面级状态：文档区、对话区、输入区 =====
+  const [layoutHydrated, setLayoutHydrated] = useState(false);
+  useEffect(() => {
+    setLayoutHydrated(true);
+  }, []);
+  const layoutStorage = useMemo<LayoutStorage>(
+    () =>
+      layoutHydrated && typeof window !== "undefined"
+        ? window.localStorage
+        : NOOP_LAYOUT_STORAGE,
+    [layoutHydrated],
+  );
+  const { defaultLayout: panelDefaultLayout, onLayoutChanged: onPanelLayoutChanged } = useDefaultLayout({
+    id: "stream-kg-main-layout-v2",
+    panelIds: ["panel-docs", "panel-graph", "panel-chat"],
+    storage: layoutStorage,
+  });
+
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -686,13 +814,13 @@ export default function HomePage() {
   }, [pendingCount]);
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 text-slate-800">
-      <div className="mx-auto flex h-screen max-w-[1600px] flex-col p-4">
-        <header className="mb-4 rounded-2xl border border-slate-200/80 bg-white/80 px-5 py-4 shadow-sm backdrop-blur">
+    <main className="h-screen overflow-hidden bg-gradient-to-br from-slate-50 via-white to-blue-50 text-slate-800">
+      <div className="flex h-full flex-col gap-2 px-2 py-2">
+        <header className="rounded-xl border border-slate-200/80 bg-white/80 px-4 py-2 shadow-sm backdrop-blur">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h1 className="text-lg font-semibold tracking-tight">stream-kg 控制台</h1>
-              <p className="text-sm text-slate-500">增量知识库 · 文档处理与问答工作台</p>
+            <div className="flex items-baseline gap-2">
+              <h1 className="text-sm font-semibold tracking-tight">stream-kg 控制台</h1>
+              <span className="text-xs text-slate-400">增量知识库 · 文档处理与问答工作台</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
               <span className="rounded-full bg-slate-100 px-3 py-1 font-medium text-slate-600">文档 {documents.length}</span>
@@ -704,12 +832,30 @@ export default function HomePage() {
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-12">
-          <section className="flex min-h-0 flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm xl:col-span-3">
-            <div className="space-y-3">
+        <PanelGroup
+          orientation="horizontal"
+          id="stream-kg-main-layout-v2"
+          defaultLayout={panelDefaultLayout}
+          onLayoutChanged={onPanelLayoutChanged}
+          className="flex min-h-0 flex-1"
+        >
+          <Panel defaultSize="24%" minSize="18%" id="panel-docs" className="flex min-h-0">
+          <section className="flex h-full min-h-0 w-full flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm">
+            <div className="space-y-2">
               <h2 className="text-sm font-semibold text-slate-800">文档导入</h2>
-              <label className="inline-flex w-full cursor-pointer items-center justify-center rounded-xl bg-slate-900 px-3 py-2 text-sm font-medium text-white transition hover:bg-slate-700">
-                {uploading ? "上传处理中..." : "选择 PDF 文件"}
+              <label
+                className={`flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed px-3 py-2.5 text-xs font-medium transition ${
+                  uploading
+                    ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400"
+                    : "border-slate-300 bg-slate-50/70 text-slate-600 hover:border-blue-400 hover:bg-blue-50/50 hover:text-blue-700"
+                }`}
+              >
+                {uploading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+                <span>{uploading ? "上传处理中..." : "上传 PDF"}</span>
                 <input
                   type="file"
                   accept=".pdf"
@@ -721,32 +867,44 @@ export default function HomePage() {
                   }}
                 />
               </label>
-              <div className="flex gap-2">
-                <input
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-                  placeholder="粘贴网页链接：https://..."
-                  value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
-                />
+              <div className="relative flex items-center gap-1.5">
+                <div className="relative flex-1">
+                  <LinkIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                  <input
+                    className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-8 pr-3 text-xs outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                    placeholder="粘贴网页链接 URL"
+                    value={urlInput}
+                    onChange={(e) => setUrlInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && urlInput.trim()) onImportUrl();
+                    }}
+                  />
+                </div>
                 <button
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  type="button"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:bg-slate-300"
                   onClick={onImportUrl}
-                  disabled={uploading}
+                  disabled={uploading || !urlInput.trim()}
+                  aria-label="导入链接"
+                  title="导入链接"
                 >
-                  导入
+                  <Plus className="h-4 w-4" />
                 </button>
               </div>
-              {uploading && <p className="text-xs text-slate-500">正在提交任务并刷新文档状态...</p>}
+              {uploading && <p className="text-[11px] text-slate-500">正在提交任务并刷新文档状态...</p>}
             </div>
 
             <div className="mt-4 mb-2 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-slate-800">文档列表</h3>
               <button
-                className="rounded-lg px-2 py-1 text-xs font-medium text-blue-600 transition hover:bg-blue-50 disabled:opacity-50"
+                className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-blue-600 transition hover:bg-blue-50 disabled:opacity-50"
                 onClick={() => void refreshDocuments()}
                 disabled={loadingDocs}
+                aria-label="刷新文档列表"
+                title="刷新文档列表"
               >
-                {loadingDocs ? "刷新中..." : "刷新"}
+                <RefreshCw className={`h-3.5 w-3.5 ${loadingDocs ? "animate-spin" : ""}`} />
+                {loadingDocs ? "刷新中" : "刷新"}
               </button>
             </div>
 
@@ -766,10 +924,11 @@ export default function HomePage() {
               </div>
               <div className="mt-2 flex items-center gap-2">
                 <button
-                  className="rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 font-medium text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => void onBatchDelete()}
                   disabled={selectedCount === 0 || deleting}
                 >
+                  {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                   {deleting ? "删除中..." : "批量删除"}
                 </button>
                 <button
@@ -815,25 +974,13 @@ export default function HomePage() {
                         </div>
                       )}
                     </div>
-                    <div className="flex flex-col gap-1">
-                      {(doc.status === "failed" || doc.status === "ready") && (
-                        <button
-                          className="rounded-lg border border-blue-200 bg-white px-2 py-1 text-[11px] font-medium text-blue-700 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          onClick={() => void onReprocess(doc)}
-                          disabled={deleting}
-                          title="重新解析并入库（保留 doc_id，清空旧 chunk/向量/实体后重建）"
-                        >
-                          重处理
-                        </button>
-                      )}
-                      <button
-                        className="rounded-lg border border-rose-200 bg-white px-2 py-1 text-[11px] font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        onClick={() => void onDeleteSingle(doc)}
-                        disabled={doc.status === "processing" || deleting}
-                      >
-                        删除
-                      </button>
-                    </div>
+                    <DocActionsMenu
+                      doc={doc}
+                      onReprocess={(d) => void onReprocess(d)}
+                      onDelete={(d) => void onDeleteSingle(d)}
+                      disabled={doc.status === "processing" || deleting}
+                      canReprocess={doc.status === "failed" || doc.status === "ready"}
+                    />
                   </div>
                 </div>
               ))}
@@ -845,7 +992,10 @@ export default function HomePage() {
             </div>
           </section>
 
-          <section className="flex min-h-0 flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm xl:col-span-5">
+          </Panel>
+          <ResizeHandle />
+          <Panel defaultSize="52%" minSize="30%" id="panel-graph" className="flex min-h-0">
+          <section className="flex h-full min-h-0 w-full flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-800">知识图谱视图</h2>
               <div className="flex items-center gap-2">
@@ -981,7 +1131,10 @@ export default function HomePage() {
             )}
           </section>
 
-          <section className="flex min-h-0 flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm xl:col-span-4">
+          </Panel>
+          <ResizeHandle />
+          <Panel defaultSize="24%" minSize="18%" id="panel-chat" className="flex min-h-0">
+          <section className="flex h-full min-h-0 w-full flex-col rounded-2xl border border-slate-200/80 bg-white/85 p-4 shadow-sm">
             <h2 className="mb-3 text-sm font-semibold text-slate-800">对话助手</h2>
           {lastRetrieval && (
             <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
@@ -1028,20 +1181,27 @@ export default function HomePage() {
               )}
             </div>
           )}
-            <div className="min-h-0 flex-1 space-y-3 overflow-auto rounded-2xl border border-slate-200 bg-slate-50/70 p-3">
+            <div className="min-h-0 flex-1 space-y-5 overflow-auto px-1 py-2">
               {messages.map((msg, idx) => (
-                <div key={`${msg.role}-${idx}`} className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-start"}`}>
-                  <div
-                    className={
-                      msg.role === "user"
-                              ? "max-w-[88%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-blue-600 px-3 py-2 text-sm leading-relaxed text-white shadow-sm"
-                              : "max-w-[88%] whitespace-pre-wrap break-words rounded-2xl rounded-bl-md border border-slate-200 bg-white px-3 py-2 text-sm leading-relaxed text-slate-700 shadow-sm"
-                    }
-                  >
-                    {msg.content || "…"}
-                  </div>
+                <div
+                  key={`${msg.role}-${idx}`}
+                  className={`flex flex-col ${msg.role === "user" ? "items-end" : "items-stretch"}`}
+                >
+                  {msg.role === "user" ? (
+                    <div className="max-w-[88%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-blue-600 px-3.5 py-2 text-sm leading-relaxed text-white shadow-sm">
+                      {msg.content || "…"}
+                    </div>
+                  ) : msg.content ? (
+                    <MarkdownMessage content={msg.content} />
+                  ) : (
+                    <div className="flex items-center gap-1.5 text-xs text-slate-400">
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-slate-400" />
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-slate-400 [animation-delay:120ms]" />
+                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-slate-400 [animation-delay:240ms]" />
+                    </div>
+                  )}
                   {msg.role === "assistant" && msg.citations && msg.citations.length > 0 && (
-                    <div className="mt-1.5 flex max-w-[88%] flex-wrap gap-1.5">
+                    <div className="mt-2 flex flex-wrap gap-1.5">
                       {msg.citations.map((cit) => (
                         <button
                           key={cit.citation_id}
@@ -1062,31 +1222,53 @@ export default function HomePage() {
                 </div>
               ))}
               {messages.length === 0 && (
-                <div className="rounded-xl border border-dashed border-slate-300 bg-white p-4 text-center text-xs text-slate-500">
+                <div className="rounded-xl border border-dashed border-slate-300 bg-white/60 p-6 text-center text-xs text-slate-500">
                   输入问题后开始对话，系统会基于已导入文档返回答案
                 </div>
               )}
             </div>
-            <div className="mt-3 flex gap-2">
-              <input
-                className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            <div className="mt-3 rounded-2xl border border-slate-200 bg-white shadow-sm transition focus-within:border-blue-300 focus-within:ring-2 focus-within:ring-blue-100">
+              <textarea
+                className="block w-full resize-none rounded-2xl bg-transparent px-4 pt-3 pb-1 text-sm leading-relaxed outline-none placeholder:text-slate-400"
+                rows={2}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="问一个关于已导入资料的问题..."
+                placeholder="尽管问，关于已导入资料的任何问题..."
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") void onSend();
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!sending && query.trim()) void onSend();
+                  }
                 }}
               />
-              <button
-                className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={sending}
-                onClick={() => void onSend()}
-              >
-                {sending ? "发送中..." : "发送"}
-              </button>
+              <div className="flex items-center justify-between px-2 pb-2">
+                <button
+                  type="button"
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled
+                  title="更多功能（暂未开放）"
+                  aria-label="更多"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400">Enter 发送 · Shift+Enter 换行</span>
+                  <button
+                    type="button"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-300"
+                    disabled={sending || !query.trim()}
+                    onClick={() => void onSend()}
+                    aria-label={sending ? "发送中" : "发送"}
+                    title={sending ? "发送中..." : "发送"}
+                  >
+                    {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
             </div>
           </section>
-        </div>
+          </Panel>
+        </PanelGroup>
       </div>
       {activeCitation && (
         <div

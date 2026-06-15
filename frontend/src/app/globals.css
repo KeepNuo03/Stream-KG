@@ -1,2 +1,46 @@
 @import "tailwindcss";
 @source "../**/*.{js,ts,jsx,tsx,mdx}";
+
+/* highlight.js 主题 CSS 在 layout.tsx 里 JS-import；
+   KaTeX 走 MathML 输出模式（见 MarkdownMessage.tsx），不再引入 katex.min.css。 */
+
+/* code highlight: 让 pre 控制圆角/背景/padding，code.hljs 只贡献色彩 */
+.markdown-message pre code.hljs {
+  background: transparent;
+  padding: 0;
+  display: block;
+}
+
+/* KaTeX MathML 输出模式 —— 浏览器原生数学排版，零字体依赖。
+   说明：rehype-katex 设了 output:"mathml" 后会直接吐 <math> 元素，KaTeX 的
+   .katex / .katex-html 类不再出现，所以那一长串 .katex 子树的 CSS 修复全废弃。
+   下面只针对原生 <math> 做最小样式：行内 inline-math 自然嵌入文本，块级
+   display-math 居中显示并支持横向滚动（防长公式撑爆面板）。 */
+.markdown-message math {
+  font-size: 1.05em;
+  line-height: normal;
+  font-family:
+    "Latin Modern Math",
+    "STIX Two Math",
+    "Cambria Math",
+    "Asana Math",
+    "Times New Roman",
+    serif;
+}
+.markdown-message math[display="block"] {
+  display: block;
+  text-align: center;
+  margin: 0.9rem 0;
+  padding: 0.4rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+/* rehype-katex 在 mathml 模式下仍保留 .katex-display 包装，让其作用一致 */
+.markdown-message .katex-display {
+  display: block;
+  text-align: center;
+  margin: 0.9rem 0;
+  padding: 0.4rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
