@@ -15,6 +15,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 from stream_kg.kg.models import ChunkRecord
+from stream_kg.storage.qdrant_point_id import entity_id_to_qdrant_point_id
 
 
 class QdrantStore:
@@ -124,7 +125,7 @@ class QdrantStore:
                 continue
             points.append(
                 models.PointStruct(
-                    id=entity_id,
+                    id=entity_id_to_qdrant_point_id(entity_id),
                     vector=vector,
                     payload={
                         "entity_id": entity_id,
@@ -154,20 +155,26 @@ class QdrantStore:
                 with_payload=True,
             )
             results = query_result.points if hasattr(query_result, "points") else query_result
-        return [
-            {
-                "entity_id": str(point.id),
-                "score": float(point.score),
-                "payload": point.payload or {},
-            }
-            for point in results
-        ]
+        rows: list[dict[str, Any]] = []
+        for point in results:
+            payload = point.payload or {}
+            logical_id = str(payload.get("entity_id") or point.id)
+            rows.append(
+                {
+                    "entity_id": logical_id,
+                    "score": float(point.score),
+                    "payload": payload,
+                }
+            )
+        return rows
 
     def delete_entity(self, entity_id: str) -> None:
         """删除单实体向量。"""
         self.client.delete(
             collection_name=self.entities_collection,
-            points_selector=models.PointIdsList(points=[entity_id]),
+            points_selector=models.PointIdsList(
+                points=[entity_id_to_qdrant_point_id(entity_id)]
+            ),
             wait=False,
         )
 

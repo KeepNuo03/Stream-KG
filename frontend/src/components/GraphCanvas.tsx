@@ -112,12 +112,7 @@ export function GraphCanvas({
   const isEmpty = visibleNodes.length === 0;
 
   useEffect(() => {
-    if (!containerRef.current || isEmpty) {
-      if (cyRef.current) {
-        cyRef.current.destroy();
-        cyRef.current = null;
-      }
-      setLayoutReady(false);
+    if (!containerRef.current) {
       return;
     }
 
@@ -155,7 +150,7 @@ export function GraphCanvas({
     if (!cyRef.current) {
       cyRef.current = cytoscape({
         container: containerRef.current,
-        elements,
+        elements: [],
         style: [
           {
             selector: "node",
@@ -229,15 +224,24 @@ export function GraphCanvas({
           onSelectRef.current(null);
         }
       });
-    } else {
-      const cy = cyRef.current;
-      cy.batch(() => {
-        cy.elements().remove();
-        cy.add(elements);
-      });
     }
 
     const cy = cyRef.current;
+    if (isEmpty) {
+      // 关键修复：空图切换时只清空元素，不销毁实例，避免 Cytoscape 在频繁
+      // destroy/recreate 过程中触发 DOM removeChild 竞态（Runtime NotFoundError）。
+      cy.batch(() => {
+        cy.elements().remove();
+      });
+      setLayoutReady(true);
+      return;
+    }
+
+    cy.batch(() => {
+      cy.elements().remove();
+      cy.add(elements);
+    });
+
     cy.nodes().forEach((node) => {
       const mentionCount = Number(node.data("mentionCount") || 1);
       const layer = String(node.data("layer") || "L1");
@@ -281,25 +285,21 @@ export function GraphCanvas({
     };
   }, []);
 
-  if (isEmpty) {
-    const hint =
-      relationFilter === "semantic"
-        ? "当前文档几乎没有语义关系边。请切换「均衡」查看高置信 co-mention，或重新导入文档。"
-        : "没有满足质量阈值的连通关系。请切换关系类型，或删除旧文档后重新导入。";
-    return (
-      <div
-        className="flex h-full min-h-[280px] w-full items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/80 p-6 text-center text-sm text-slate-500"
-      >
-        <div>
-          <p className="font-medium text-slate-600">暂无可视化子图</p>
-          <p className="mt-2 max-w-sm text-xs leading-relaxed">{hint}</p>
-        </div>
-      </div>
-    );
-  }
+  const hint =
+    relationFilter === "semantic"
+      ? "当前文档几乎没有语义关系边。请切换「均衡」查看高置信 co-mention，或重新导入文档。"
+      : "没有满足质量阈值的连通关系。请切换关系类型，或删除旧文档后重新导入。";
 
   return (
     <div className="relative h-full min-h-[280px] w-full">
+      {isEmpty && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/85 p-6 text-center text-sm text-slate-500">
+          <div>
+            <p className="font-medium text-slate-600">暂无可视化子图</p>
+            <p className="mt-2 max-w-sm text-xs leading-relaxed">{hint}</p>
+          </div>
+        </div>
+      )}
       {!layoutReady && (
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-white/70 text-xs text-slate-500">
           布局计算中…

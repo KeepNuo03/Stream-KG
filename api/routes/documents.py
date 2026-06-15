@@ -423,7 +423,9 @@ async def reprocess_document(doc_id: str, background_tasks: BackgroundTasks) -> 
     """对已有文档重新触发 ingestion。
 
     - processing 状态下禁止重复触发，避免并发重复处理；
-    - 将状态回写为 pending，复用同一条流水线逻辑。
+    - **先清掉旧 chunks / mentions / edges / 向量**，再回置 pending；
+      否则每次重处理都会让 chunk/mention 翻倍累积。
+    - 复用同一条流水线逻辑。
     """
     sqlite_store = get_sqlite_store()
     document = await sqlite_store.get_document(doc_id)
@@ -431,6 +433,15 @@ async def reprocess_document(doc_id: str, background_tasks: BackgroundTasks) -> 
         raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
     if document.status == "processing":
         raise HTTPException(status_code=409, detail="Document is currently processing")
+
+    if settings.feature_kg_enabled:
+        kg_cleanup = get_kg_cleanup_service()
+        await kg_cleanup.cleanup_for_reprocess(doc_id)
+    else:
+        # KG 关闭时仍要清 chunks/Qdrant，避免 chunk 翻倍。
+        await asyncio.to_thread(_delete_vectors_best_effort, doc_id)
+        await sqlite_store.delete_chunks_by_doc(doc_id)
+
     await sqlite_store.set_document_status(doc_id, "pending", error_message=None)
     background_tasks.add_task(_enqueue_ingest, doc_id)
     return {"doc_id": doc_id, "status": "pending", "message": "Reprocess queued"}

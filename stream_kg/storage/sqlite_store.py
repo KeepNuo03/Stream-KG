@@ -353,6 +353,29 @@ class SQLiteStore:
             await db.execute("DELETE FROM documents WHERE doc_id = ?", (doc_id,))
             await db.commit()
 
+    async def delete_chunks_by_doc(self, doc_id: str) -> None:
+        """删除指定文档的全部 chunk。
+
+        FK 级联：``entity_mentions`` / ``kg_extraction_logs`` /
+        ``temporal_edges``（按 ``evidence_chunk_id``）会随之删除。
+        ``doc_entity_links`` 关联文档而非 chunk，需要调用方单独清理。
+        """
+        async with self._connection() as db:
+            await db.execute("DELETE FROM chunks WHERE doc_id = ?", (doc_id,))
+            await db.commit()
+
+    async def delete_doc_entity_links_by_doc(self, doc_id: str) -> None:
+        """删除指定文档的 doc_entity_links（L0-L1 元数据，不影响实体本体）。"""
+        async with self._connection() as db:
+            await db.execute("DELETE FROM doc_entity_links WHERE doc_id = ?", (doc_id,))
+            await db.commit()
+
+    async def delete_kg_extraction_logs_by_doc(self, doc_id: str) -> None:
+        """删除指定文档的 LLM 抽取日志。"""
+        async with self._connection() as db:
+            await db.execute("DELETE FROM kg_extraction_logs WHERE doc_id = ?", (doc_id,))
+            await db.commit()
+
     async def upsert_chunks(self, chunks: list[ChunkRecord]) -> None:
         """批量写入 chunk 元数据。"""
         if not chunks:

@@ -199,8 +199,10 @@ class IngestPipeline:
         for mention, vector in zip(mentions, mention_vectors, strict=True):
             mention.vector = vector
 
-        # 直接构造 ResolveResult（action=create 只为兼容下游 vector 写入）。
+        # 直接构造 ResolveResult；vector 写 Qdrant 改为批量（perf：5s/条 -> 一次 PUT）。
         seen_entity_ids: set[str] = set()
+        vector_entries: list[dict] = []
+        vector_payloads: list[list[float]] = []
         for mention in mentions:
             if not mention.entity_id:
                 continue
@@ -216,6 +218,19 @@ class IngestPipeline:
                 score=1.0,
             )
             await self.graph_update.apply_resolution(mention=mention, result=result)
+            if is_new and mention.vector:
+                vector_entries.append(
+                    {
+                        "entity_id": mention.entity_id,
+                        "canonical_name": mention.surface_form,
+                        "entity_type": ent_type,
+                        "aliases": [mention.surface_form],
+                    }
+                )
+                vector_payloads.append(mention.vector)
+
+        if vector_entries:
+            await self.graph_update.flush_entity_vectors(vector_entries, vector_payloads)
 
         temporal_edges = self.temporal_extractor.extract(mentions, chunks)
         await self.graph_update.add_edges(temporal_edges)

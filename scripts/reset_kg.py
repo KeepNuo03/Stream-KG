@@ -1,4 +1,4 @@
-"""Reset KG artifacts for Phase B migration/testing.
+r"""Reset KG artifacts for Phase B migration/testing.
 
 清理范围：
 - SQLite: entities / entity_mentions / temporal_edges / doc_entity_links / kg_extraction_logs
