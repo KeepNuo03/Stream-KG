@@ -307,8 +307,10 @@ export default function HomePage() {
   const [graphViewMode, setGraphViewMode] = useState<"mixed" | "l1" | "l0">("mixed");
   const [canvasTab, setCanvasTab] = useState<"mindmap" | "graph">("mindmap");
   const [mindmapMarkdown, setMindmapMarkdown] = useState<string>("");
+  const [mindmapError, setMindmapError] = useState<string | null>(null);
   const [loadingMindmap, setLoadingMindmap] = useState(false);
   const [focusDocId, setFocusDocId] = useState<string | null>(null);
+  const [canvasDocId, setCanvasDocId] = useState<string | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const [globalGraphView, setGlobalGraphView] = useState(false);
   const [graphSearch, setGraphSearch] = useState("");
@@ -330,9 +332,44 @@ export default function HomePage() {
   const confirmDialog = useConfirm();
 
   const pendingCount = useMemo(
-    () => documents.filter((item) => item.status === "pending" || item.status === "processing").length,
+    () =>
+      documents.filter(
+        (item) =>
+          item.status === "pending" ||
+          item.status === "processing" ||
+          item.kg_status === "extracting"
+      ).length,
     [documents]
   );
+
+  const mindmapDocId = useMemo(() => {
+    if (graphDocFilter !== "all") return graphDocFilter;
+    if (canvasDocId) return canvasDocId;
+    if (selectedDocIds.size === 1) return [...selectedDocIds][0] ?? null;
+    return null;
+  }, [graphDocFilter, canvasDocId, selectedDocIds]);
+
+  const mindmapDocTitle = useMemo(() => {
+    if (!mindmapDocId) return null;
+    return documents.find((d) => d.doc_id === mindmapDocId)?.title ?? mindmapDocId;
+  }, [mindmapDocId, documents]);
+
+  function selectCanvasDocument(docId: string) {
+    setCanvasDocId(docId);
+    setGraphDocFilter(docId);
+    setFocusNodeId(null);
+    setGlobalGraphView(false);
+    setFocusDocId(docId);
+  }
+
+  function resetGraphView() {
+    setFocusNodeId(null);
+    setRelationFilters(["balanced"]);
+    setGlobalGraphView(false);
+    if (mindmapDocId) setFocusDocId(mindmapDocId);
+    else setFocusDocId(null);
+    void refreshGraph();
+  }
   const readyCount = useMemo(() => documents.filter((item) => item.status === "ready").length, [documents]);
   const selectableDocIds = useMemo(
     () => documents.filter((item) => item.status !== "processing").map((item) => item.doc_id),
@@ -375,7 +412,7 @@ export default function HomePage() {
         limit_nodes: "36",
         min_mentions: "2",
         max_edges: "48",
-        relation_type: relationFilters[0] ?? "balanced",
+        relation_type: "balanced",
         hop: "1",
       });
       if (!globalGraphView && focusDocId) {
@@ -401,21 +438,28 @@ export default function HomePage() {
         setLoadingGraph(false);
       }
     }
-  }, [graphDocFilter, relationFilters, graphViewMode, focusDocId, focusNodeId, globalGraphView]);
+  }, [graphDocFilter, graphViewMode, focusDocId, focusNodeId, globalGraphView]);
 
   const fetchMindmap = useCallback(async (docId: string) => {
     setLoadingMindmap(true);
+    setMindmapError(null);
     try {
       const res = await fetch(`${API_BASE}/documents/${docId}/mindmap`);
-      if (!res.ok) throw new Error(`mindmap HTTP ${res.status}`);
+      if (!res.ok) {
+        const errBody = await res.text();
+        throw new Error(errBody || `HTTP ${res.status}`);
+      }
       const data = (await res.json()) as { markdown?: string };
       setMindmapMarkdown(data.markdown ?? "");
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "思维导图生成失败";
       setMindmapMarkdown("");
+      setMindmapError(message);
+      toast.show({ kind: "error", message: "思维导图加载失败", detail: message.slice(0, 120) });
     } finally {
       setLoadingMindmap(false);
     }
-  }, []);
+  }, [toast]);
 
   const loadEdgeExplain = useCallback(async (edge: GraphCanvasEdge) => {
     setSelectedEdge(edge);
@@ -888,19 +932,15 @@ export default function HomePage() {
   }, [refreshGraph]);
 
   useEffect(() => {
-    const anchorDoc =
-      graphDocFilter !== "all"
-        ? graphDocFilter
-        : selectedDocIds.size === 1
-          ? ([...selectedDocIds][0] ?? null)
-          : null;
+    const anchorDoc = mindmapDocId;
     setFocusDocId(anchorDoc);
     if (anchorDoc) {
       void fetchMindmap(anchorDoc);
     } else {
       setMindmapMarkdown("");
+      setMindmapError(null);
     }
-  }, [graphDocFilter, selectedDocIds, fetchMindmap]);
+  }, [mindmapDocId, fetchMindmap]);
 
   useEffect(() => {
     const pollEvents = async () => {
@@ -1131,7 +1171,15 @@ export default function HomePage() {
                       onChange={(e) => toggleDocSelected(doc.doc_id, e.target.checked)}
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="break-words font-medium text-slate-800">{doc.title}</div>
+                      <button
+                        type="button"
+                        className={`block w-full text-left break-words font-medium transition hover:text-indigo-700 ${
+                          mindmapDocId === doc.doc_id ? "text-indigo-700" : "text-slate-800"
+                        }`}
+                        onClick={() => selectCanvasDocument(doc.doc_id)}
+                      >
+                        {doc.title}
+                      </button>
                       <div className="mt-2 flex items-center justify-between text-xs">
                         <span className="font-medium text-slate-500">{doc.doc_type.toUpperCase()}</span>
                         <span className={`rounded-full px-2 py-1 ${statusMeta[doc.status].tone}`}>
@@ -1223,14 +1271,40 @@ export default function HomePage() {
             </div>
             {canvasTab === "mindmap" ? (
               <div className="flex min-h-0 flex-1 flex-col gap-2">
-                {!focusDocId ? (
+                {!mindmapDocId ? (
                   <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-500">
-                    请在左侧选择或筛选一篇文档，查看思维导图
+                    <div>
+                      <p className="font-medium text-slate-600">请选择一篇文档</p>
+                      <p className="mt-2 text-xs">点击左侧文档标题，或在图谱区「文档」下拉框中选择</p>
+                    </div>
                   </div>
-                ) : loadingMindmap ? (
-                  <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">思维导图生成中…</div>
                 ) : (
-                  <MindMapCanvas markdown={mindmapMarkdown} />
+                  <>
+                    <div className="text-xs text-slate-500">
+                      当前文档：<span className="font-medium text-slate-700">{mindmapDocTitle}</span>
+                    </div>
+                    {loadingMindmap ? (
+                      <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">
+                        思维导图生成中（首次约 10–30 秒）…
+                      </div>
+                    ) : mindmapError ? (
+                      <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-amber-200 bg-amber-50 p-4 text-center text-sm text-amber-800">
+                        <div>
+                          <p className="font-medium">思维导图未生成</p>
+                          <p className="mt-1 text-xs">{mindmapError}</p>
+                          <button
+                            type="button"
+                            className="mt-2 rounded-lg border border-amber-300 px-2 py-1 text-xs hover:bg-amber-100"
+                            onClick={() => void fetchMindmap(mindmapDocId)}
+                          >
+                            重试
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <MindMapCanvas markdown={mindmapMarkdown} />
+                    )}
+                  </>
                 )}
               </div>
             ) : graphError ? (
@@ -1252,8 +1326,17 @@ export default function HomePage() {
             ) : !graphData || graphData.stats.node_count === 0 ? (
               <div className="flex min-h-0 flex-1 items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-gradient-to-b from-slate-50 to-slate-100/70 p-6 text-center text-sm text-slate-500">
                 <div>
-                  <p className="font-medium text-slate-600">暂无图谱节点</p>
-                  <p className="mt-1 text-xs">请先导入并处理文档，系统会在 Phase 2 自动增量入图</p>
+                  <p className="font-medium text-slate-600">暂无可视化子图</p>
+                  <p className="mt-1 text-xs">
+                    可能因关系筛选过严或节点焦点过窄。请尝试重置视图，或切换文档下拉框。
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-3 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50"
+                    onClick={() => resetGraphView()}
+                  >
+                    重置图谱视图
+                  </button>
                 </div>
               </div>
             ) : (
@@ -1306,6 +1389,25 @@ export default function HomePage() {
                     onClick={() => setGlobalGraphView((v) => !v)}
                   >
                     {globalGraphView ? "切到文档锚定" : "切到全局视图"}
+                  </button>
+                  {focusNodeId && (
+                    <button
+                      type="button"
+                      className="rounded-lg border border-indigo-200 px-2 py-1 text-indigo-700 hover:bg-indigo-50"
+                      onClick={() => {
+                        setFocusNodeId(null);
+                        void refreshGraph();
+                      }}
+                    >
+                      清除节点焦点
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="rounded-lg border border-slate-200 px-2 py-1 text-slate-600 hover:bg-slate-50"
+                    onClick={() => resetGraphView()}
+                  >
+                    重置视图
                   </button>
                   <span className="text-slate-500">
                     节点 {graphData.stats.node_count} · 边 {graphData.stats.edge_count}

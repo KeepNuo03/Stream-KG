@@ -104,12 +104,14 @@ function saveLayoutCache(cache: Map<string, { x: number; y: number }>) {
 }
 
 function filterEdges(edges: GraphCanvasEdge[], relationFilters: string[]): GraphCanvasEdge[] {
-  if (relationFilters.length === 0 || relationFilters.includes("all")) return edges;
-  if (relationFilters.includes("balanced")) return edges;
+  if (relationFilters.length === 0) return edges;
+  if (relationFilters.includes("all") || relationFilters.includes("balanced")) return edges;
   if (relationFilters.includes("semantic")) {
     return edges.filter((edge) => edge.relation_type !== "mentions");
   }
-  return edges.filter((edge) => relationFilters.includes(edge.relation_type));
+  const matched = edges.filter((edge) => relationFilters.includes(edge.relation_type));
+  // 筛选结果为空时回退到全部边，避免整图消失
+  return matched.length > 0 ? matched : edges;
 }
 
 function buildVisibleGraph(

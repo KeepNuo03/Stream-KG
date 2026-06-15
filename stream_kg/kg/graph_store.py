@@ -299,6 +299,8 @@ class GraphStore:
             graph = self._require_graph()
 
             ego_focus = focus_node_id
+            if ego_focus and ego_focus not in graph.nodes:
+                ego_focus = None
             if not ego_focus and focus_doc_id:
                 ego_focus = f"doc::{focus_doc_id}"
 
