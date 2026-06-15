@@ -1,13 +1,15 @@
 "use client";
 
+import { localizeRelation } from "@/lib/kg-labels";
+
 const RELATION_CHIPS = [
   { id: "balanced", label: "均衡" },
   { id: "semantic", label: "语义" },
-  { id: "mentions", label: "共现" },
-  { id: "extends", label: "extends" },
-  { id: "improves", label: "improves" },
-  { id: "uses", label: "uses" },
-  { id: "conflict", label: "冲突" },
+  { id: "mentions", label: "文档提及" },
+  { id: "extends", label: localizeRelation("extends") },
+  { id: "improves", label: localizeRelation("improves") },
+  { id: "uses", label: localizeRelation("uses") },
+  { id: "conflict", label: localizeRelation("conflict") },
 ];
 
 type GraphToolbarProps = {

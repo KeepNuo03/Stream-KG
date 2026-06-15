@@ -28,6 +28,9 @@ import { PdfDrawer } from "@/components/PdfDrawer";
 import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { localizeExplanationText, localizeRelation } from "@/lib/kg-labels";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
 
 type DocumentItem = {
   doc_id: string;
@@ -97,6 +100,7 @@ type GraphEdge = {
   target_label?: string;
   relation_type: string;
   confidence: number;
+  evidence?: string;
 };
 type GraphData = {
   nodes: GraphNode[];
@@ -120,21 +124,6 @@ type EntityDetail = {
     confidence: number;
   }>;
 };
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1";
-
-const relationTypeLabel: Record<string, string> = {
-  mentions: "共现",
-  improves: "改进",
-  extends: "扩展",
-  contradicts: "对立",
-  surveys: "综述",
-  related: "相关",
-};
-
-function localizeRelation(type: string): string {
-  return relationTypeLabel[type] ?? type;
-}
 
 function localizeKgStatus(status: DocumentItem["kg_status"] | undefined): string {
   if (status === "extracting") return "知识提取中";
@@ -354,6 +343,11 @@ export default function HomePage() {
     return documents.find((d) => d.doc_id === mindmapDocId)?.title ?? mindmapDocId;
   }, [mindmapDocId, documents]);
 
+  const focusDocTitle = useMemo(() => {
+    if (!focusDocId) return null;
+    return documents.find((d) => d.doc_id === focusDocId)?.title ?? "当前文档";
+  }, [focusDocId, documents]);
+
   function selectCanvasDocument(docId: string) {
     setCanvasDocId(docId);
     setGraphDocFilter(docId);
@@ -462,7 +456,17 @@ export default function HomePage() {
   }, [toast]);
 
   const loadEdgeExplain = useCallback(async (edge: GraphCanvasEdge) => {
-    setSelectedEdge(edge);
+    const labelById = new Map(graphData?.nodes.map((n) => [n.id, n.label]) ?? []);
+    const headLabel =
+      edge.source_label || labelById.get(edge.source) || edge.source;
+    const tailLabel =
+      edge.target_label || labelById.get(edge.target) || edge.target;
+    const edgeWithLabels: GraphCanvasEdge = {
+      ...edge,
+      source_label: headLabel,
+      target_label: tailLabel,
+    };
+    setSelectedEdge(edgeWithLabels);
     setLoadingEdgeExplain(true);
     setEdgeExplanation("");
     try {
@@ -474,19 +478,30 @@ export default function HomePage() {
           tail_id: edge.target,
           relation_type: edge.relation_type,
           evidence: edge.evidence ?? "",
-          head_label: edge.source_label ?? "",
-          tail_label: edge.target_label ?? "",
+          head_label: headLabel,
+          tail_label: tailLabel,
         }),
       });
-      if (!res.ok) throw new Error(`explain HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const err = (await res.json()) as { detail?: string };
+          if (err.detail) detail = err.detail;
+        } catch {
+          // ignore
+        }
+        throw new Error(detail);
+      }
       const data = (await res.json()) as { explanation?: string };
-      setEdgeExplanation(data.explanation ?? "");
-    } catch {
-      setEdgeExplanation("无法生成关系解释");
+      const text = localizeExplanationText(data.explanation ?? "").trim();
+      setEdgeExplanation(text || "暂无关系解释");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "请求失败";
+      setEdgeExplanation(`无法生成关系解释（${message}）`);
     } finally {
       setLoadingEdgeExplain(false);
     }
-  }, []);
+  }, [graphData?.nodes]);
 
   const loadEntityDetail = useCallback(async (entityId: string | null) => {
     setSelectedEntityId(entityId);
@@ -1411,7 +1426,9 @@ export default function HomePage() {
                   </button>
                   <span className="text-slate-500">
                     节点 {graphData.stats.node_count} · 边 {graphData.stats.edge_count}
-                    {focusDocId && !globalGraphView ? ` · 锚定 ${focusDocId.slice(0, 8)}…` : ""}
+                    {focusDocId && !globalGraphView && focusDocTitle
+                      ? ` · 锚定《${focusDocTitle}》`
+                      : ""}
                   </span>
                 </div>
                 <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_240px]">
@@ -1444,8 +1461,8 @@ export default function HomePage() {
                         ) : (
                           <div className="space-y-2">
                             <div className="font-medium text-slate-700">
-                              {selectedEdge.source_label || selectedEdge.source} → {selectedEdge.relation_type} →{" "}
-                              {selectedEdge.target_label || selectedEdge.target}
+                              {selectedEdge.source_label} → {localizeRelation(selectedEdge.relation_type)} →{" "}
+                              {selectedEdge.target_label}
                             </div>
                             <p className="leading-relaxed text-slate-600">{edgeExplanation || "暂无解释"}</p>
                             {selectedEdge.relation_type === "conflict" && selectedEdge.evidence && (
@@ -1613,29 +1630,18 @@ export default function HomePage() {
                   }
                 }}
               />
-              <div className="flex items-center justify-between px-2 pb-2">
+              <div className="flex items-center justify-end gap-2 px-2 pb-2">
+                <span className="text-[11px] text-slate-400">Enter 发送 · Shift+Enter 换行</span>
                 <button
                   type="button"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled
-                  title="更多功能（暂未开放）"
-                  aria-label="更多"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-300"
+                  disabled={sending || !query.trim()}
+                  onClick={() => void onSend()}
+                  aria-label={sending ? "发送中" : "发送"}
+                  title={sending ? "发送中..." : "发送"}
                 >
-                  <Plus className="h-3.5 w-3.5" />
+                  {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
                 </button>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-400">Enter 发送 · Shift+Enter 换行</span>
-                  <button
-                    type="button"
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-blue-600 text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-300"
-                    disabled={sending || !query.trim()}
-                    onClick={() => void onSend()}
-                    aria-label={sending ? "发送中" : "发送"}
-                    title={sending ? "发送中..." : "发送"}
-                  >
-                    {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-                  </button>
-                </div>
               </div>
             </div>
           </section>

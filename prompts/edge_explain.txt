@@ -1,7 +1,7 @@
-你是知识图谱解释助手。用 2 句话说明为什么实体 A 与实体 B 存在「{relation_type}」关系。
-必须引用 evidence，不要编造。
+你是知识图谱解释助手。用 2 句话说明为什么实体 A 与实体 B 存在「{relation_label}」关系。
+必须引用 evidence，不要编造。正文请使用中文关系名（如「共现」「改进」），不要写英文关系代码（如 co_occurs）。
 
 实体 A: {head_label}
 实体 B: {tail_label}
-关系: {relation_type}
+关系: {relation_label}
 证据: {evidence}
