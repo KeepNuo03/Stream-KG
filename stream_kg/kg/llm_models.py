@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
+import logging
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 # === 12 类实体（13 文档 §1.3） ===
@@ -103,30 +106,89 @@ class LlmRelation(BaseModel):
         return (v or "").strip()
 
 
+# 内部缓存合法枚举集合，避免每次校验都走 get_args
+_VALID_ENTITY_TYPES: frozenset[str] = frozenset(get_args(LlmEntityType))
+_VALID_RELATION_TYPES: frozenset[str] = frozenset(get_args(LlmRelationType))
+
+
 class KgExtraction(BaseModel):
     """单 chunk 的 LLM 抽取结果（顶层 JSON 对象）。
 
-    反序列化时自动应用 3 道治理（见模块 docstring）。
+    反序列化时自动应用 5 道治理（见模块 docstring + 真实 smoke 后扩充）：
+    1. entity type 非法 → 回落 'concept'（保留实体；smoke R-023 实测发现 LLM 偶发）
+    2. relation type 非法 → **整条 relation 丢弃**（不污染图谱语义；同 R-023）
+    3. salience<0.4 entity 丢
+    4. entities 超 12 按 salience 截断 top-N
+    5. relation 端点不在 entities 列表 → 丢
+
+    1 & 2 在 `mode='before'` 跑（pydantic Literal 校验之前），所以 list 中**单条非法**
+    不会导致整个 KgExtraction 校验失败 —— 这是 Phase A smoke 暴露的关键修复：
+    PoC 没遇到这种情况，14-chunk 真跑就因为 LLM 凭空发明 `involved_in` 关系导致
+    整 chunk（10+ 个 entities）丢失。
 
     用法：
         raw_json_str = await deepseek.chat(...)
         extraction = KgExtraction.model_validate_json(raw_json_str)
-        # extraction.entities / extraction.relations 已经清洗、截断、过滤过
     """
 
     entities: list[LlmEntity] = Field(default_factory=list)
     relations: list[LlmRelation] = Field(default_factory=list)
 
+    @field_validator("entities", mode="before")
+    @classmethod
+    def _coerce_unknown_entity_types(cls, v: Any) -> Any:
+        """非法 entity type → 回落 'concept' 保留实体。"""
+        if not isinstance(v, list):
+            return v
+        cleaned: list[Any] = []
+        for item in v:
+            if not isinstance(item, dict):
+                cleaned.append(item)
+                continue
+            etype = item.get("type")
+            if etype is not None and etype not in _VALID_ENTITY_TYPES:
+                logger.info(
+                    "LLM emitted unknown entity type %r for name=%r → fallback to 'concept'",
+                    etype,
+                    item.get("name"),
+                )
+                item = {**item, "type": "concept"}
+            cleaned.append(item)
+        return cleaned
+
+    @field_validator("relations", mode="before")
+    @classmethod
+    def _drop_unknown_relations(cls, v: Any) -> Any:
+        """非法 relation type → 整条 relation 丢弃（不污染图谱语义）。"""
+        if not isinstance(v, list):
+            return v
+        cleaned: list[Any] = []
+        for item in v:
+            if not isinstance(item, dict):
+                cleaned.append(item)
+                continue
+            rtype = item.get("relation")
+            if rtype is not None and rtype not in _VALID_RELATION_TYPES:
+                logger.info(
+                    "LLM emitted unknown relation type %r for %r-?->-%r → drop relation",
+                    rtype,
+                    item.get("head"),
+                    item.get("tail"),
+                )
+                continue
+            cleaned.append(item)
+        return cleaned
+
     @model_validator(mode="after")
     def _enforce_extraction_policies(self) -> KgExtraction:
-        # 1) 低 salience 过滤
+        # 3) 低 salience 过滤
         self.entities = [e for e in self.entities if e.salience >= SALIENCE_FLOOR]
-        # 2) 超量截断（按 salience 降序）
+        # 4) 超量截断（按 salience 降序）
         if len(self.entities) > MAX_ENTITIES_PER_CHUNK:
             self.entities = sorted(self.entities, key=lambda e: e.salience, reverse=True)[
                 :MAX_ENTITIES_PER_CHUNK
             ]
-        # 3) 关系端点必须在 entities 列表中，否则丢弃（防止 LLM 凭空捏造连接）
+        # 5) 关系端点必须在 entities 列表中，否则丢弃（防止 LLM 凭空捏造连接）
         valid_names = {e.name for e in self.entities}
         self.relations = [
             r for r in self.relations if r.head in valid_names and r.tail in valid_names

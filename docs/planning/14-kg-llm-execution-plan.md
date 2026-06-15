@@ -328,6 +328,7 @@
 | 2026-06-15 | 与 13 设计文档对齐审计（§13） | 修正 7 处不一致；同步反向校准 13 文档 |
 | 2026-06-15 | Phase A.0 PoC 6/6 通过（§10） | prompt 一稿即用；deepseek-chat 在 attention 论文上 100% 覆盖、100% 解析、平均 5.47s；可放心进 Phase A |
 | 2026-06-15 | **Phase A 11/11 落地** | 47 个新单测全绿，0 回归；总 79/83（4 pre-existing 失败收 backlog）；§13 audit #8 修订 E1 默认值；§11 加 Phase A 监控指标实测数 + Backlog 表 |
+| 2026-06-15 | **Phase A smoke 端到端通过 + R-023 修复** | 14-chunk 论文真跑 24.4s / ¥0.033 / 143 entities + 104 relations / **14/14 ok**（修前 13/14）；R-023 修复 LLM 偶发凭空发明 entity/relation type 导致整 chunk 丢；4 个新单测 + §13 audit #11 |
 
 ---
 
@@ -347,4 +348,5 @@
 | 8 | E1 决策默认值 | 14 §0 表原写「`feature_kg_use_llm` 默认开 LLM」 | Phase A 落地时改为**默认 False**（自动路径走旧规则）；手动 `POST /extract-kg` 不受开关约束强制 LLM。理由：默认开 LLM 会让任何上传都触发 LLM 调用，对成本失控；手动触发是用户明确意图，决策 3 已拍板手动模式 | 已改 14 §0 E1 备注；Phase A 代码以"安全默认 + 显式开启"实现 |
 | 9 | `documents` 新字段 | 13 §3.1 只列 `kg_status` | Phase A 实际加了 `kg_error_message`（前端展示失败原因 / 监控告警必需） | 已在 14 §2 A.5 备注；建议反向校准 13 §3.1 schema 块加一行 `kg_error_message TEXT` |
 | 10 | 新文件位置 | 13 §3 把 `KgExtraction` pydantic 放 `stream_kg/kg/models.py` | 旧 `kg/models.py` 已有 `EntityType`（6 种 Literal），改它会连环 break entity_extractor / online_resolve 等 5 个文件 | Phase A 改为**新建 `stream_kg/kg/llm_models.py`** 与旧解耦；旧 6 种枚举保留给旧规则 fallback，新 12 种独立给 LLM 路径用。Phase B 删旧代码时一并清理 |
+| 11 | 治理过严：单条非法 type 让整 chunk 失败 | 13 §2.5 错误处理矩阵未覆盖"LLM 凭空发明 type" | smoke 实测 14 chunk 真跑命中 1 次（7%），整 chunk 10+ entities 被连坐丢失；性价比极低 | R-023：`KgExtraction` 加 `mode='before'` validator —— 非法 entity type 回落 `concept`（保留实体），非法 relation type 丢这一条（不污染语义）。已落 `kg/llm_models.py` + 4 单测；重跑 smoke 14/14 ok。详见暴雷日志 R-023 |
 

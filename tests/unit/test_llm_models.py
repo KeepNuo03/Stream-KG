@@ -151,6 +151,73 @@ def test_extraction_missing_optional_fields_get_defaults() -> None:
     assert ext.entities[0].salience == 0.5
 
 
+def test_unknown_entity_type_falls_back_to_concept() -> None:
+    """R-023 smoke 修复：LLM 凭空发明 entity type 不应让整 chunk 校验失败。"""
+    payload = {
+        "entities": [
+            {"name": "X", "type": "method", "salience": 0.9},
+            {"name": "Y", "type": "invalid_kind", "salience": 0.8},  # 应回落 concept
+        ],
+        "relations": [],
+    }
+    ext = KgExtraction.model_validate(payload)
+    assert len(ext.entities) == 2
+    by_name = {e.name: e for e in ext.entities}
+    assert by_name["X"].type == "method"
+    assert by_name["Y"].type == "concept", "未知 entity type 必须回落 concept 而非丢弃"
+
+
+def test_unknown_relation_type_drops_only_that_relation() -> None:
+    """R-023 smoke 修复：LLM 凭空发明关系类型只丢这一条，不让整 chunk 失败。"""
+    payload = {
+        "entities": [
+            {"name": "Vaswani", "type": "person", "salience": 0.7},
+            {"name": "Transformer", "type": "method", "salience": 0.95},
+            {"name": "Google", "type": "organization", "salience": 0.6},
+        ],
+        "relations": [
+            {"head": "Vaswani", "relation": "proposes", "tail": "Transformer", "confidence": 0.9},
+            # 非法 relation type，整条丢
+            {"head": "Vaswani", "relation": "involved_in", "tail": "Google", "confidence": 0.7},
+            {"head": "Vaswani", "relation": "affiliated_with", "tail": "Google", "confidence": 0.9},
+        ],
+    }
+    ext = KgExtraction.model_validate(payload)
+    # 3 实体全保留
+    assert len(ext.entities) == 3
+    # involved_in 丢，剩 2 条合法 relation
+    assert len(ext.relations) == 2
+    rels = {(r.head, r.relation, r.tail) for r in ext.relations}
+    assert ("Vaswani", "proposes", "Transformer") in rels
+    assert ("Vaswani", "affiliated_with", "Google") in rels
+    # 非法 type 不应留下
+    assert all(r.relation != "involved_in" for r in ext.relations)
+
+
+def test_mixed_unknown_types_smoke_realistic_case() -> None:
+    """模拟 smoke 实测：1 个非法 entity type + 1 个非法 relation type，
+    剩余数据全部保留。"""
+    payload = {
+        "entities": [
+            {"name": "Transformer", "type": "method", "salience": 0.95},
+            {"name": "self-attention", "type": "concept", "salience": 0.85},
+            # 非法 type → 回落 concept
+            {"name": "BLEU score", "type": "evaluation_metric", "salience": 0.7},
+        ],
+        "relations": [
+            {"head": "Transformer", "relation": "uses", "tail": "self-attention", "confidence": 0.9},
+            # 非法 → 丢
+            {"head": "Transformer", "relation": "scored_on", "tail": "BLEU score", "confidence": 0.85},
+        ],
+    }
+    ext = KgExtraction.model_validate(payload)
+    assert len(ext.entities) == 3
+    bleu = next(e for e in ext.entities if e.name == "BLEU score")
+    assert bleu.type == "concept"
+    assert len(ext.relations) == 1
+    assert ext.relations[0].relation == "uses"
+
+
 def test_extraction_full_attention_paper_sample_works_end_to_end() -> None:
     """端到端：模拟 PoC 实际看到的 abstract 抽取结果，应全部通过治理。"""
     payload = {

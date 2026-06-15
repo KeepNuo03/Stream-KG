@@ -169,11 +169,15 @@ async def test_extract_chunk_retries_on_bad_json_then_succeeds() -> None:
 
 
 async def test_extract_chunk_schema_failure_does_not_retry() -> None:
+    """schema validation 错（不属于 R-023 治理可回落范围）→ 不重试。
+
+    用 salience 越界触发硬 ValidationError；非法 entity/relation type 现在
+    会被 `mode='before'` validator 回落（见 test_llm_models），不再到这里。
+    """
     extractor, fake = _make_extractor(max_retries=2)
-    # 合法 JSON 但 schema 错（type 不在 12 种枚举内）
     bad_payload = json.dumps(
         {
-            "entities": [{"name": "X", "type": "INVALID_TYPE", "salience": 0.8}],
+            "entities": [{"name": "X", "type": "method", "salience": 99.0}],  # salience > 1.0
             "relations": [],
         }
     )
@@ -188,6 +192,35 @@ async def test_extract_chunk_schema_failure_does_not_retry() -> None:
     assert fake.chat_raw.await_count == 1
     # raw_output 仍保存，便于人工 debug prompt
     assert result.attempt.raw_output is not None
+
+
+async def test_extract_chunk_recovers_when_llm_emits_unknown_relation_type() -> None:
+    """R-023 smoke 修复：LLM 关系类型非法 → 整 chunk 抽取仍 success，
+    只丢那条非法 relation。"""
+    extractor, fake = _make_extractor(max_retries=2)
+    payload = json.dumps(
+        {
+            "entities": [
+                {"name": "A", "type": "method", "salience": 0.9},
+                {"name": "B", "type": "concept", "salience": 0.8},
+            ],
+            "relations": [
+                {"head": "A", "relation": "uses", "tail": "B", "confidence": 0.9},
+                {"head": "A", "relation": "involved_in", "tail": "B", "confidence": 0.7},
+            ],
+        }
+    )
+    fake.chat_raw.return_value = _mock_response(payload)
+
+    result = await extractor.extract_chunk(chunk_id="c1", chunk_text="hi")
+
+    assert result.success is True
+    assert result.extraction is not None
+    assert len(result.extraction.entities) == 2
+    assert len(result.extraction.relations) == 1
+    assert result.extraction.relations[0].relation == "uses"
+    # 不应重试（这是治理后的 success，不是 schema fail）
+    assert fake.chat_raw.await_count == 1
 
 
 # ---------- 治理（端到端：raw → 治理后） ----------
