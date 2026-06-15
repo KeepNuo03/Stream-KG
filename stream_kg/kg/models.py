@@ -15,6 +15,9 @@ ResolveAction = Literal["merge", "create"]
 TemporalRelType = Literal["improves", "contradicts", "extends", "surveys", "mentions"]
 
 
+KgStatus = Literal["unprocessed", "extracting", "ready", "failed"]
+
+
 @dataclass(slots=True)
 class DocumentRecord:
     """Persistent document metadata."""
@@ -29,6 +32,10 @@ class DocumentRecord:
     page_count: int | None = None
     error_message: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # P3-X · Phase A：知识抽取状态（独立于 ingest 的 status）。
+    # 旧库 ALTER ADD COLUMN 后默认值 = 'unprocessed'（见 sqlite_store.initialize）。
+    kg_status: KgStatus = "unprocessed"
+    kg_error_message: str | None = None
 
 
 @dataclass(slots=True)

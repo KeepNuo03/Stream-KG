@@ -261,10 +261,13 @@ ingest_pipeline._run_incremental_kg():
 ### 3.1 新增表（SQLite）
 
 ```sql
--- 文档级元信息（沿用 documents 表，仅新增 kg_status 字段）
+-- 文档级元信息（沿用 documents 表，新增 kg_status + kg_error_message）
+-- 注：SQLite ALTER TABLE ADD COLUMN 不接受 CHECK 子句，约束由应用层 enforce。
 ALTER TABLE documents ADD COLUMN kg_status TEXT
-    CHECK (kg_status IN ('unprocessed','extracting','ready','failed'))
-    DEFAULT 'unprocessed';
+    NOT NULL DEFAULT 'unprocessed';
+-- kg_status 取值集合：'unprocessed' | 'extracting' | 'ready' | 'failed'
+ALTER TABLE documents ADD COLUMN kg_error_message TEXT;
+-- 失败时填充 LLM 错因（前端展示 / 监控告警），ready/extracting 时为 NULL
 
 -- 实体表（升级现有 entities）
 -- 注（2026-06-15 校准）：description / aliases_json 已在初始 schema 中存在

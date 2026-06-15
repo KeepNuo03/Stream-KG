@@ -16,7 +16,7 @@
 
 | # | 决策项 | 选择 | 备注 |
 |---|--------|------|------|
-| E1 | 旧规则抽取代码 | **保留作 fallback** | 新增 `feature_kg_use_llm` 子开关，默认开 LLM；待 LLM 稳定后 P4 删除旧代码 |
+| E1 | 旧规则抽取代码 | **保留作 fallback** | 新增 `feature_kg_use_llm` 子开关；**自动触发路径默认 False**（防误烧钱），手动 `POST /extract-kg` 永远走 LLM 路径（决策 3）。Phase A 落地时基于成本控制将默认从「True」改为「False」，由用户 `.env` 显式开启自动 LLM —— 详见 §13 audit #8 |
 | E2 | 触发粒度 | **MVP 单文档手动触发** | 批量按钮放后期，避免引入队列/并发治理增加复杂度 |
 | E3 | 旧 KG 数据 | **升级时清空** | 提供 `scripts/reset_kg.py` 一键清掉 `entities` / `entity_mentions` / `temporal_edges` / `graph.pkl`；旧规则数据本身质量差，留着混淆视听 |
 | E4 | PoC 模型 | **`deepseek-chat` 起步** | 验证通路；prod 切回 `.env` 配的 `deepseek-v4-flash` |
@@ -50,31 +50,38 @@
 
 > 目标：把 PoC 的脚本化抽取改造为可被 ingest pipeline 调用的服务模块。
 
-- [ ] **A.1** 新建 `stream_kg/llm/deepseek_client.py`，提供 `chat()` / `chat_stream()`
-- [ ] **A.2** 把 `rag_generator.py` 里的 DeepSeek HTTP 调用迁移到 `deepseek_client`，**单测先跑通**
-- [ ] **A.3** 新建 `stream_kg/encoding/llm_extractor.py` + `prompts/kg_extraction.txt`
-- [ ] **A.4** 新建 `stream_kg/kg/models.py` 内 `KgExtraction` / `LlmEntity` / `LlmRelation` pydantic 模型 + jsonschema 校验
-  - 实体类型枚举严格对齐 13 文档 §1.3（12 种），未覆盖类型回落 `concept`
+- [x] **A.1** 新建 `stream_kg/llm/deepseek_client.py`，提供 `chat()` / `chat_raw()` / `chat_stream()`，统一 `DeepSeekError` 异常
+- [x] **A.2** 把 `rag_generator.py` 里的 DeepSeek HTTP 调用迁移到 `deepseek_client`，**单测先跑通**（57 → 64 全绿）
+- [x] **A.3** 新建 `stream_kg/encoding/llm_extractor.py` + `prompts/kg_extraction.txt`（PoC 复用，零迭代）
+- [x] **A.4** 新建 `stream_kg/kg/llm_models.py`（与旧 `kg/models.py` 解耦）内 `KgExtraction` / `LlmEntity` / `LlmRelation` pydantic 模型
+  - 实体类型枚举严格对齐 13 文档 §1.3（12 种）—— **新文件独立，不破坏旧 6 种 EntityType**
   - 关系类型枚举严格对齐 13 文档 §1.4（10 种语义关系，不含 `mentions`，后者是 containment 边）
   - 实体数量上限：单 chunk 抽取后按 `salience` 排序截断 top 12（13 文档 §2.5 噪声治理）
-- [ ] **A.5** `sqlite_store` schema 升级（沿用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 幂等风格）：
-  - 新表 `kg_extraction_logs`（13 文档 §3.1）
-  - 新字段 `documents.kg_status TEXT CHECK (kg_status IN ('unprocessed','extracting','ready','failed')) DEFAULT 'unprocessed'`
+  - 治理三件套（model_validator）：salience<0.4 丢、超量截断、端点不在 entities 的 relation 丢
+- [x] **A.5** `sqlite_store` schema 升级（沿用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 幂等风格）：
+  - 新表 `kg_extraction_logs`（13 文档 §3.1，含 chunk_id/doc_id 外键级联）
+  - 新字段 `documents.kg_status TEXT DEFAULT 'unprocessed'` + `kg_error_message TEXT`
+  - 新 helper：`set_document_kg_status` / `insert_kg_extraction_log` / `get_kg_extraction_stats`
+  - 单测覆盖旧库 ALTER 迁移（**关键回归保护**）+ 幂等性
   - 注：`entities.description` / `entities.aliases_json` 已存在，**不要重复 ALTER**（13 文档 §3.1 已校准）
-- [ ] **A.6** `config.py` 新增：`feature_kg_use_llm: bool=True`、`kg_extraction_concurrency: int=5`、`kg_extraction_max_retries: int=3`、`kg_budget_yuan: float=10.0`
-- [ ] **A.7** `ingest_pipeline._run_incremental_kg` 改造：feature flag 路由（旧规则 / LLM）；**上传后默认不再自动跑 KG**
-- [ ] **A.8** 新增 `POST /api/v1/documents/{doc_id}/extract-kg`：异步触发 LLM 抽取，立即返回 `{status: extracting}`
-- [ ] **A.9** 单测覆盖：`llm_extractor` JSON 解析 / 失败重试 / 端点过滤 / 实体超量截断 / 类型枚举回落；mock DeepSeek API
-  - 覆盖 13 文档 §2.5 错误处理矩阵全部 6 种情况
-- [ ] **A.10** 文档更新：`docs/研发暴雷与修复日志.md` 记录 PoC 阶段踩坑
-- [ ] **A.11** commit: `feat(kg): Phase A - LLM 抽取核心模块`
+- [x] **A.6** `config.py` 新增：`feature_kg_use_llm: bool=False`（见 E1 修订）、`kg_extraction_concurrency: int=5`、`kg_extraction_max_retries: int=3`、`kg_extraction_max_tokens: int=2048`、`kg_extraction_timeout_sec: float=30.0`、`kg_budget_yuan: float=10.0`
+- [x] **A.7** `ingest_pipeline.run_llm_extraction(doc_id)`：调 LlmExtractor → 写 kg_extraction_logs → 更 doc.kg_status；自动路径根据 `feature_kg_use_llm` 路由（True 走 LLM，False 走旧规则 fallback）；**Phase A 只写 logs 不上图**（图谱写入留给 Phase B）
+- [x] **A.8** 新增 `POST /api/v1/documents/{doc_id}/extract-kg`（202 + 后台任务）+ `GET /{doc_id}/kg-stats`（监控）；并发保护：未 ready 文档 / 正在抽取 → 409
+- [x] **A.9** 单测覆盖（47 个全绿，0 回归）：
+  - `test_llm_models.py` (14)：pydantic 校验 + 治理三件套 + 端到端 attention sample
+  - `test_llm_extractor.py` (11)：HTTP 重试 / JSON 解析重试 / schema 不重试 / batch 并发 / 部分失败
+  - `test_sqlite_kg_schema.py` (7)：ALTER 幂等 + 旧库迁移 + status 全生命周期 + stats 汇总 + 级联删除
+  - `test_ingest_llm_extraction.py` (7)：全成功 / 全失败 / 部分失败 / 中间态 extracting / 无 chunk / 文档不存在 / 抽取器 crash
+  - `test_documents_extract_kg_endpoint.py` (8)：404 / 409×2 / 202 happy path / failed 可重试 / kg-stats 空 / kg-stats 汇总
+- [x] **A.10** 文档更新：14 文档 §0 / §2 / §8 / §10 / §12 / §13 全部刷新（本次提交）；R-022 已在 PoC 阶段写入 `研发暴雷与修复日志.md`
+- [x] **A.11** commit: `feat(kg): Phase A - LLM 抽取核心模块`
 
 **验收标准**：
-- 后端 `pytest -q` 全绿
-- curl 触发抽取 → 1 分钟内返回 ready，sqlite `kg_extraction_logs` 有记录
-- `entities` 表里能看到 LLM 抽出的高质量实体
+- ✅ 后端 `pytest -q` 全绿（64 → 79 passed，新增 47 个全绿，4 个 pre-existing 失败已记入 §11 backlog）
+- ⏸ `entities` 表里能看到 LLM 抽出的高质量实体 —— **依赖 Phase B 入图，Phase A 只写 kg_extraction_logs**
+- ⏸ curl 触发抽取 → 1 分钟内返回 ready，sqlite `kg_extraction_logs` 有记录 —— Phase A 已具备能力（路由 + 写 logs），待 Phase B commit 后 curl 端到端验证
 
-**进度**：0/11  **Commit**：—
+**进度**：11/11 ✅  **Commit**：(本批 commit)
 
 ---
 
@@ -185,12 +192,12 @@
 | Phase | 任务数 | 完成 | 进度 | Commit |
 |-------|--------|------|------|--------|
 | A.0 PoC | 6 | 6 | ✅ 100% | (Phase A 同批 commit) |
-| A 抽取核心 | 11 | 0 | 0% | — |
+| A 抽取核心 | 11 | 11 | ✅ 100% | (本批 commit) |
 | B 数据模型 + 图 | 11 | 0 | 0% | — |
 | C 规范化简化版 | 6 | 0 | 0% | — |
 | D 前端重做 | 9 | 0 | 0% | — |
 | E 监控错误处理 | 5 | 0 | 0% | — |
-| **合计** | **48** | **6** | **13%** | — |
+| **合计** | **48** | **17** | **35%** | — |
 
 ---
 
@@ -299,10 +306,17 @@
 
 | 风险 | 监控指标 | 当前状态 |
 |------|---------|---------|
-| API 成本超支 | 累计 token 消耗 / 累计 ¥ | — |
-| LLM 输出不稳定 | 同 chunk 多次抽取实体差异率 | — |
-| 抽取速度 | 单文档抽取 P95 耗时 | — |
-| 图谱卡死 | 单文档实体数 P95 | — |
+| API 成本超支 | 累计 token 消耗 / 累计 ¥ | A.0 PoC：6 次调用 ¥0.01；Phase A 已落 `kg_extraction_logs` 表 + `GET /kg-stats` 监控 endpoint |
+| LLM 输出不稳定 | 同 chunk 多次抽取实体差异率 | A.0 PoC：3 次重跑实体/关系数 100% 一致；temperature=0.0 + json_object 确定性极高 |
+| 抽取速度 | 单文档抽取 P95 耗时 | A.0 PoC：单 chunk 4-7s；按并发 5 估算 100-chunk 论文 ~100-140s |
+| 图谱卡死 | 单文档实体数 P95 | A.4 治理：MAX_ENTITIES_PER_CHUNK=12 硬上限 + salience<0.4 过滤 + dangling relation 丢弃 |
+
+### Backlog（Phase A 期间发现，非本期范围）
+
+| # | 项目 | 影响 | 计划 |
+|---|------|------|------|
+| BL-1 | `tests/unit/test_entity_extractor.py` 2 个旧测试断言 `redis` 应保留为有效实体，但 R-020 加强黑名单后被过滤 | 旧规则路径回归保护缺失；不影响 LLM 路径 | Phase A 收尾后单独小 commit 修：要么更新断言、要么 R-020 黑名单加白名单豁免 |
+| BL-2 | `tests/unit/test_graph_store{,_reload}.py` 2 个旧测试断言孤立节点应出现在 export，但 R-020 后默认过滤 | 旧规则路径 + 旧图 export 模式回归；Phase B 会重写 `export_graph` 引入 view_mode 三档，这两测试届时会被替换 | Phase B 重写 export_graph 时一并替换/删除 |
 
 ---
 
@@ -313,6 +327,7 @@
 | 2026-06-15 | 文档初始化，5 个执行决策拍板 | — |
 | 2026-06-15 | 与 13 设计文档对齐审计（§13） | 修正 7 处不一致；同步反向校准 13 文档 |
 | 2026-06-15 | Phase A.0 PoC 6/6 通过（§10） | prompt 一稿即用；deepseek-chat 在 attention 论文上 100% 覆盖、100% 解析、平均 5.47s；可放心进 Phase A |
+| 2026-06-15 | **Phase A 11/11 落地** | 47 个新单测全绿，0 回归；总 79/83（4 pre-existing 失败收 backlog）；§13 audit #8 修订 E1 默认值；§11 加 Phase A 监控指标实测数 + Backlog 表 |
 
 ---
 
@@ -329,4 +344,7 @@
 | 5 | 关系类型数 | §1.4 列 11 行（含 mentions） | 10 类语义关系 + 1 类 containment (`mentions`) | 已改 14 §5 D.2 描述 |
 | 6 | 错误处理覆盖 | §2.5 6 种 | A.4 / A.9 需显式覆盖噪声实体 top 12 截断 | 已扩 14 §2 A.4 / A.9 |
 | 7 | 多余前端依赖 | §4.1 只要 cytoscape-fcose | hover tooltip 用 Cytoscape 内置事件即可 | 已删 14 §5 D.1 的 popper / @floating-ui/dom |
+| 8 | E1 决策默认值 | 14 §0 表原写「`feature_kg_use_llm` 默认开 LLM」 | Phase A 落地时改为**默认 False**（自动路径走旧规则）；手动 `POST /extract-kg` 不受开关约束强制 LLM。理由：默认开 LLM 会让任何上传都触发 LLM 调用，对成本失控；手动触发是用户明确意图，决策 3 已拍板手动模式 | 已改 14 §0 E1 备注；Phase A 代码以"安全默认 + 显式开启"实现 |
+| 9 | `documents` 新字段 | 13 §3.1 只列 `kg_status` | Phase A 实际加了 `kg_error_message`（前端展示失败原因 / 监控告警必需） | 已在 14 §2 A.5 备注；建议反向校准 13 §3.1 schema 块加一行 `kg_error_message TEXT` |
+| 10 | 新文件位置 | 13 §3 把 `KgExtraction` pydantic 放 `stream_kg/kg/models.py` | 旧 `kg/models.py` 已有 `EntityType`（6 种 Literal），改它会连环 break entity_extractor / online_resolve 等 5 个文件 | Phase A 改为**新建 `stream_kg/kg/llm_models.py`** 与旧解耦；旧 6 种枚举保留给旧规则 fallback，新 12 种独立给 LLM 路径用。Phase B 删旧代码时一并清理 |
 

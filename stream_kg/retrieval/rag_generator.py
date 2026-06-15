@@ -8,16 +8,14 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 from typing import AsyncIterator
 
-import httpx
-
 from stream_kg.config import settings
 from stream_kg.encoding.text_quality import is_usable_document_text
 from stream_kg.kg.models import RetrievalChunk
+from stream_kg.llm import DeepSeekClient, DeepSeekError
 from stream_kg.storage.sqlite_store import SQLiteStore
 
 
@@ -40,8 +38,16 @@ RAG_SYSTEM_PROMPT = (
 class RagGenerator:
     """基于检索上下文生成“可引用”答案。"""
 
-    def __init__(self, *, sqlite_store: SQLiteStore) -> None:
+    def __init__(
+        self,
+        *,
+        sqlite_store: SQLiteStore,
+        llm_client: DeepSeekClient | None = None,
+    ) -> None:
         self.sqlite_store = sqlite_store
+        # 复用统一的 DeepSeek 客户端（Phase A.2 重构）。
+        # 测试可以注入 mock client；prod 默认从 settings 加载 key/base/model。
+        self.llm_client = llm_client or DeepSeekClient()
 
     async def generate(self, *, query: str, chunks: list[RetrievalChunk]) -> dict[str, Any]:
         """生成答案并返回被引用的上下文索引。"""
@@ -140,90 +146,41 @@ class RagGenerator:
         """判断 chunk 文本是否可用于回答（过滤明显乱码）。"""
         return is_usable_document_text(text)
 
+    def _rag_messages(self, prompt: str) -> list[dict[str, str]]:
+        return [
+            {"role": "system", "content": RAG_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+
     async def stream_llm(self, *, prompt: str) -> AsyncIterator[str]:
-        """以真正的远程流式输出返回 token 文本片段。"""
-        if not settings.llm_api_key:
+        """以真正的远程流式输出返回 token 文本片段。
+
+        Phase A.2 重构：底层走 `DeepSeekClient.chat_stream()`，
+        失败兜底行为完全不变（前端展示一行可读错误 + 引用提示）。
+        """
+        if not self.llm_client.is_ready:
             yield "当前未配置 LLM_API_KEY，已返回基于检索片段的占位结果。[1]"
             return
 
-        payload = {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": RAG_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": settings.llm_max_tokens,
-            "temperature": settings.llm_temperature,
-            "stream": True,
-            # DeepSeek V4 默认可能先输出 reasoning_content；关闭后可更快输出最终答案 token。
-            "thinking": {"type": "disabled"},
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=None) as client:
-                async with client.stream(
-                    "POST",
-                    f"{settings.llm_api_base}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.llm_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data: "):
-                            data = line[6:].strip()
-                            if data == "[DONE]":
-                                break
-                            parsed = json.loads(data)
-                            token = (
-                                parsed.get("choices", [{}])[0]
-                                .get("delta", {})
-                                .get("content")
-                            )
-                            if isinstance(token, str) and token:
-                                yield token
-        except Exception as exc:
-            # 不中断主流程：把错误文本作为单条 token 输出，前端可直接展示。
-            yield f"LLM 流式调用失败（{exc.__class__.__name__}），请稍后重试。基于当前检索片段可先参考：[1]"
+            async for token in self.llm_client.chat_stream(messages=self._rag_messages(prompt)):
+                yield token
+        except DeepSeekError as exc:
+            yield (
+                f"LLM 流式调用失败（{exc.__class__.__name__}），"
+                f"请稍后重试。基于当前检索片段可先参考：[1]"
+            )
 
     async def _call_llm(self, prompt: str) -> str:
-        """调用远程 LLM；失败时返回可读兜底文本。"""
-        if not settings.llm_api_key:
+        """非流式调用 LLM；失败时返回可读兜底文本。"""
+        if not self.llm_client.is_ready:
             return "当前未配置 LLM_API_KEY，已返回基于检索片段的占位结果。[1]"
 
-        payload = {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": RAG_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": settings.llm_max_tokens,
-            "temperature": settings.llm_temperature,
-            # 与流式路径保持一致：关闭 thinking，减少首包等待并统一输出风格。
-            "thinking": {"type": "disabled"},
-        }
-
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                response = await client.post(
-                    f"{settings.llm_api_base}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {settings.llm_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-            return (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "根据已有资料无法回答。[1]")
-            )
-        except Exception as exc:
+            return await self.llm_client.chat(messages=self._rag_messages(prompt))
+        except DeepSeekError as exc:
             # MVP 阶段不中断主流程，返回可读错误文本便于前端展示。
-            return f"LLM 调用失败（{exc.__class__.__name__}），请稍后重试。基于当前检索片段可先参考：[1]"
+            return (
+                f"LLM 调用失败（{exc.__class__.__name__}），"
+                f"请稍后重试。基于当前检索片段可先参考：[1]"
+            )

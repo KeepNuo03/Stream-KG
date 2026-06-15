@@ -17,7 +17,7 @@ from typing import Any
 
 import aiosqlite
 
-from stream_kg.kg.models import ChunkRecord, DocumentRecord, EntityMention, TemporalEdge
+from stream_kg.kg.models import ChunkRecord, DocumentRecord, EntityMention, KgStatus, TemporalEdge
 
 
 def _iso_now() -> str:
@@ -30,6 +30,37 @@ def _from_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value)
+
+
+def _row_to_document(row: aiosqlite.Row) -> DocumentRecord:
+    """aiosqlite.Row → DocumentRecord（统一 list / get 路径）。
+
+    兼容 P3-X 之前的旧库：
+    - kg_status / kg_error_message 字段在 Phase A.5 才加，旧库可能不存在；
+      用 try/get 兼容（aiosqlite.Row 不支持 .get，需用 KeyError catch）。
+    """
+    try:
+        kg_status = row["kg_status"] or "unprocessed"
+    except (IndexError, KeyError):
+        kg_status = "unprocessed"
+    try:
+        kg_error_message = row["kg_error_message"]
+    except (IndexError, KeyError):
+        kg_error_message = None
+    return DocumentRecord(
+        doc_id=row["doc_id"],
+        title=row["title"],
+        doc_type=row["doc_type"],
+        source_uri=row["source_uri"],
+        status=row["status"],
+        ingested_at=_from_iso(row["ingested_at"]) or datetime.now(UTC),
+        published_at=_from_iso(row["published_at"]),
+        page_count=row["page_count"],
+        error_message=row["error_message"],
+        metadata=json.loads(row["metadata_json"] or "{}"),
+        kg_status=kg_status,
+        kg_error_message=kg_error_message,
+    )
 
 
 class SQLiteStore:
@@ -137,8 +168,47 @@ class SQLiteStore:
                     created_at          TEXT NOT NULL,
                     UNIQUE(head_entity_id, tail_entity_id, relation_type)
                 );
+
+                -- P3-X · Phase A：LLM 抽取日志（13 文档 §3.1，14 文档 A.5）。
+                -- 每个 chunk 一行；attempt_count 累计含重试；status: 'ok'|'failed'
+                CREATE TABLE IF NOT EXISTS kg_extraction_logs (
+                    log_id              TEXT PRIMARY KEY,
+                    chunk_id            TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+                    doc_id              TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+                    status              TEXT NOT NULL CHECK (status IN ('ok', 'failed')),
+                    attempt_count       INTEGER NOT NULL DEFAULT 1,
+                    elapsed_sec         REAL NOT NULL DEFAULT 0.0,
+                    prompt_tokens       INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens   INTEGER NOT NULL DEFAULT 0,
+                    cost_yuan           REAL NOT NULL DEFAULT 0.0,
+                    entities_count      INTEGER NOT NULL DEFAULT 0,
+                    relations_count     INTEGER NOT NULL DEFAULT 0,
+                    error_message       TEXT,
+                    raw_output          TEXT,
+                    created_at          TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_logs_doc ON kg_extraction_logs(doc_id);
+                CREATE INDEX IF NOT EXISTS idx_kg_logs_status ON kg_extraction_logs(status, created_at);
                 """
             )
+
+            # P3-X · Phase A：给已存在的 documents 表 ALTER 增字段（幂等）。
+            # SQLite 的 ALTER TABLE ADD COLUMN 不支持 IF NOT EXISTS，
+            # 必须先 PRAGMA table_info 检查，否则二次启动会抛 'duplicate column'。
+            async with db.execute("PRAGMA table_info(documents)") as cur:
+                cols = {row[1] for row in await cur.fetchall()}
+            if "kg_status" not in cols:
+                # SQLite ALTER ADD 不接受 CHECK / NOT NULL（无默认时）；
+                # 用 DEFAULT 让旧行自动回填 'unprocessed'，约束由应用层 enforce。
+                await db.execute(
+                    "ALTER TABLE documents ADD COLUMN kg_status TEXT "
+                    "NOT NULL DEFAULT 'unprocessed'"
+                )
+            if "kg_error_message" not in cols:
+                await db.execute(
+                    "ALTER TABLE documents ADD COLUMN kg_error_message TEXT"
+                )
+
             await db.commit()
 
     async def create_document(
@@ -207,18 +277,7 @@ class SQLiteStore:
                 row = await cur.fetchone()
         if row is None:
             return None
-        return DocumentRecord(
-            doc_id=row["doc_id"],
-            title=row["title"],
-            doc_type=row["doc_type"],
-            source_uri=row["source_uri"],
-            status=row["status"],
-            ingested_at=_from_iso(row["ingested_at"]) or datetime.now(UTC),
-            published_at=_from_iso(row["published_at"]),
-            page_count=row["page_count"],
-            error_message=row["error_message"],
-            metadata=json.loads(row["metadata_json"] or "{}"),
-        )
+        return _row_to_document(row)
 
     async def list_documents(
         self,
@@ -247,21 +306,7 @@ class SQLiteStore:
                 tuple(args + [limit, offset]),
             )
 
-        documents = [
-            DocumentRecord(
-                doc_id=row["doc_id"],
-                title=row["title"],
-                doc_type=row["doc_type"],
-                source_uri=row["source_uri"],
-                status=row["status"],
-                ingested_at=_from_iso(row["ingested_at"]) or datetime.now(UTC),
-                published_at=_from_iso(row["published_at"]),
-                page_count=row["page_count"],
-                error_message=row["error_message"],
-                metadata=json.loads(row["metadata_json"] or "{}"),
-            )
-            for row in rows
-        ]
+        documents = [_row_to_document(row) for row in rows]
         total = int(total_row["total"]) if total_row else 0
         return documents, total
 
@@ -623,3 +668,125 @@ class SQLiteStore:
         async with self._connection() as db:
             await db.execute("DELETE FROM entities WHERE entity_id = ?", (entity_id,))
             await db.commit()
+
+    # ==========================================================================
+    # P3-X · Phase A：LLM KG 抽取状态 / 日志
+    # ==========================================================================
+
+    async def set_document_kg_status(
+        self,
+        doc_id: str,
+        kg_status: KgStatus,
+        *,
+        error_message: str | None = None,
+    ) -> None:
+        """更新文档的 KG 抽取状态。
+
+        - 'extracting' / 'ready' 时建议传 error_message=None 清空旧错误；
+        - 'failed' 时务必传 error_message 便于前端展示原因。
+        """
+        async with self._connection() as db:
+            await db.execute(
+                """
+                UPDATE documents
+                SET kg_status = ?,
+                    kg_error_message = ?
+                WHERE doc_id = ?
+                """,
+                (kg_status, error_message, doc_id),
+            )
+            await db.commit()
+
+    async def insert_kg_extraction_log(
+        self,
+        *,
+        log_id: str,
+        chunk_id: str,
+        doc_id: str,
+        status: str,
+        attempt_count: int,
+        elapsed_sec: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_yuan: float,
+        entities_count: int,
+        relations_count: int,
+        error_message: str | None = None,
+        raw_output: str | None = None,
+    ) -> None:
+        """写入一条 chunk 级抽取日志（成本 + 监控 + debug 三用）。
+
+        status 必须是 'ok' 或 'failed'（SQLite CHECK 约束）。
+        raw_output 在 failed 时建议保留原始 LLM 响应，便于人工调 prompt。
+        """
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT INTO kg_extraction_logs(
+                    log_id, chunk_id, doc_id, status, attempt_count,
+                    elapsed_sec, prompt_tokens, completion_tokens, cost_yuan,
+                    entities_count, relations_count, error_message, raw_output,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_id,
+                    chunk_id,
+                    doc_id,
+                    status,
+                    attempt_count,
+                    elapsed_sec,
+                    prompt_tokens,
+                    completion_tokens,
+                    cost_yuan,
+                    entities_count,
+                    relations_count,
+                    error_message,
+                    raw_output,
+                    _iso_now(),
+                ),
+            )
+            await db.commit()
+
+    async def get_kg_extraction_stats(
+        self, *, doc_id: str | None = None
+    ) -> dict[str, Any]:
+        """汇总 KG 抽取统计（监控 / 预算告警用）。
+
+        - 不传 doc_id：全库汇总；
+        - 传 doc_id：单文档汇总。
+        """
+        where = "WHERE doc_id = ?" if doc_id else ""
+        args: tuple = (doc_id,) if doc_id else ()
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"""
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), 0) AS ok_count,
+                    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+                    COALESCE(SUM(prompt_tokens), 0) AS total_prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0) AS total_completion_tokens,
+                    COALESCE(SUM(cost_yuan), 0.0) AS total_cost_yuan,
+                    COALESCE(SUM(entities_count), 0) AS total_entities,
+                    COALESCE(SUM(relations_count), 0) AS total_relations
+                FROM kg_extraction_logs
+                {where}
+                """,
+                args,
+            ) as cur:
+                row = await cur.fetchone()
+        if row is None:
+            return {
+                "total": 0,
+                "ok_count": 0,
+                "failed_count": 0,
+                "total_prompt_tokens": 0,
+                "total_completion_tokens": 0,
+                "total_cost_yuan": 0.0,
+                "total_entities": 0,
+                "total_relations": 0,
+            }
+        return dict(row)

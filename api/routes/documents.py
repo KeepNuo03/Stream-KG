@@ -70,6 +70,12 @@ async def _enqueue_ingest(doc_id: str) -> None:
     await pipeline.run(doc_id)
 
 
+async def _enqueue_llm_extraction(doc_id: str) -> None:
+    """后台任务入口：按文档 ID 执行 LLM KG 抽取（Phase A.8）。"""
+    pipeline = get_ingest_pipeline()
+    await pipeline.run_llm_extraction(doc_id=doc_id)
+
+
 def _delete_vectors_best_effort(doc_id: str) -> None:
     """后台最佳努力删除向量，不阻塞主请求。"""
     qdrant_store = get_qdrant_store()
@@ -352,6 +358,62 @@ async def batch_delete_documents(
         deleted=deleted,
         failed=failed,
     )
+
+
+@router.post("/{doc_id}/extract-kg", status_code=202)
+async def extract_kg(doc_id: str, background_tasks: BackgroundTasks) -> dict:
+    """手动触发 LLM-based KG 抽取（P3-X · Phase A.8）。
+
+    **强制走 LLM 路径**，不受 `feature_kg_use_llm` 开关约束 —— 决策 3：
+    手动触发即明确用户意图（13 文档 §0 / 14 文档 §0 E2）。
+
+    并发保护：
+    - 文档 ingestion 未完成（status != 'ready'）→ 409
+    - 已经在抽取中（kg_status == 'extracting'）→ 409，防止重复消费 LLM 配额
+    """
+    sqlite_store = get_sqlite_store()
+    document = await sqlite_store.get_document(doc_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+    if document.status != "ready":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Document not ready (ingestion status: {document.status}); "
+                "wait for ingestion to finish before extracting KG"
+            ),
+        )
+    if document.kg_status == "extracting":
+        raise HTTPException(
+            status_code=409, detail="KG extraction already in progress for this document"
+        )
+
+    background_tasks.add_task(_enqueue_llm_extraction, doc_id)
+    return {
+        "doc_id": doc_id,
+        "kg_status": "extracting",
+        "message": "KG extraction queued",
+    }
+
+
+@router.get("/{doc_id}/kg-stats")
+async def get_kg_stats(doc_id: str) -> dict:
+    """查询单文档的 KG 抽取统计（Phase A.8 / Phase E 监控）。
+
+    返回 chunk 级 ok/failed 计数、累计 token 消耗、累计花费，
+    供前端展示抽取进度 / 失败原因 / 成本透视。
+    """
+    sqlite_store = get_sqlite_store()
+    document = await sqlite_store.get_document(doc_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+    stats = await sqlite_store.get_kg_extraction_stats(doc_id=doc_id)
+    return {
+        "doc_id": doc_id,
+        "kg_status": document.kg_status,
+        "kg_error_message": document.kg_error_message,
+        **stats,
+    }
 
 
 @router.post("/{doc_id}/reprocess", status_code=202)

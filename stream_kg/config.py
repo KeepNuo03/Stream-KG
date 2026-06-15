@@ -94,5 +94,23 @@ class Settings(BaseSettings):
     feature_reranker_enabled: bool = False
     feature_graph_router_enabled: bool = False
 
+    # === LLM KG 抽取（P3-X · Phase A，见 docs/planning/14-kg-llm-execution-plan.md） ===
+    # 默认 False：上传时如果 feature_kg_enabled=True，仍走旧规则抽取（行为不变）；
+    # 用户通过 POST /api/v1/documents/{doc_id}/extract-kg 显式触发时**强制用 LLM**，
+    # 不受此开关约束（手动触发即明确意图）。
+    # 把此项设为 True 时：feature_kg_enabled=True 的上传流程会自动走 LLM 抽取（耗钱，慎开）。
+    feature_kg_use_llm: bool = False
+    # 单个文档内并发抽取的 chunk 数（asyncio.Semaphore）。E5 决策：5 起步。
+    kg_extraction_concurrency: int = 5
+    # 单 chunk 抽取失败重试次数（13 文档 §2.5）。
+    kg_extraction_max_retries: int = 3
+    # 每次 LLM 调用 max_tokens 上限；典型抽取输出 200-900 token，2048 留富余。
+    kg_extraction_max_tokens: int = 2048
+    # 单 chunk 抽取超时（秒）。PoC 实测 5-7s，给 30s 富余防偶发慢响应。
+    kg_extraction_timeout_sec: float = 30.0
+    # 月度 LLM 费用上限（CNY）；超额暂停（13 文档 §6 风险表）。
+    # PoC 实测：100 chunk 论文 ~0.17 CNY → 默认 10 元能跑约 6000 chunk。
+    kg_budget_yuan: float = 10.0
+
 
 settings = Settings()
