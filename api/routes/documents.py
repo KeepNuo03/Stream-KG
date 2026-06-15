@@ -249,6 +249,8 @@ async def get_document(doc_id: str) -> dict:
         "title": document.title,
         "doc_type": document.doc_type,
         "status": document.status,
+        "kg_status": document.kg_status,
+        "kg_error_message": document.kg_error_message,
         "source_uri": document.source_uri,
         "published_at": document.published_at.isoformat() if document.published_at else None,
         "ingested_at": document.ingested_at.isoformat(),

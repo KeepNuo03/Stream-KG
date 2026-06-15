@@ -42,9 +42,16 @@ def fake_llm_extractor() -> AsyncMock:
 @pytest.fixture
 def pipeline(store: SQLiteStore, fake_llm_extractor: AsyncMock) -> IngestPipeline:
     """构造 IngestPipeline，依赖 sqlite_store 真实 + 其他 mock。"""
+    graph_store = MagicMock()
+    graph_store.upsert_document_node = AsyncMock()
+    graph_store.upsert_entity_node = AsyncMock()
+    graph_store.upsert_doc_entity_link = AsyncMock()
+    graph_store.upsert_entity_edge_v2 = AsyncMock()
+    graph_store.build_cross_doc_edges = AsyncMock(return_value=0)
+    graph_store.persist = AsyncMock()
     return IngestPipeline(
         sqlite_store=store,
-        graph_store=MagicMock(),
+        graph_store=graph_store,
         qdrant_store=MagicMock(),
         embedder=MagicMock(),
         llm_extractor=fake_llm_extractor,

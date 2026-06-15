@@ -33,6 +33,7 @@ from stream_kg.ingestion.web_parser import WebParser
 from stream_kg.kg.candidate_retrieval import CandidateRetrieval
 from stream_kg.kg.graph_store import GraphStore
 from stream_kg.kg.graph_update import GraphUpdateService
+from stream_kg.kg.llm_models import LlmRelation
 from stream_kg.kg.online_resolve import OnlineResolver
 from stream_kg.kg.temporal_extract import TemporalExtractor
 from stream_kg.kg.models import ResolveResult
@@ -277,6 +278,13 @@ class IngestPipeline:
             return {"total": len(chunks), "ok": 0, "failed": len(chunks)}
 
         # 逐 chunk 落 logs（顺序写避免 sqlite 并发写竞争）
+        entity_name_to_id: dict[str, str] = {}
+        # Phase B.9：确保文档节点先存在（后续 L0-L1 边依赖）
+        await self.graph_store.upsert_document_node(
+            doc_id=doc_id,
+            doc_type=document.doc_type,
+            title=document.title,
+        )
         for result in summary.results:
             await self.sqlite_store.insert_kg_extraction_log(
                 log_id=str(uuid4()),
@@ -298,6 +306,61 @@ class IngestPipeline:
                 # 失败时保留 raw_output 供 debug；成功就别灌满库（每条 raw 可能上 KB）
                 raw_output=result.attempt.raw_output if not result.success else None,
             )
+            # Phase B.9：LLM 抽取结果落图 + 写 doc_entity_links
+            if result.extraction is None:
+                continue
+            # 1) entities（L1）
+            for ent in result.extraction.entities:
+                canonical = canonicalize_label(ent.name)
+                if not canonical:
+                    continue
+                entity_id = derive_entity_id(canonical, ent.type)
+                entity_name_to_id[ent.name] = entity_id
+                await self.graph_store.upsert_entity_node(
+                    entity_id=entity_id,
+                    canonical_name=ent.name,
+                    entity_type=ent.type,
+                    doc_id=doc_id,
+                    chunk_id=result.chunk_id,
+                    aliases=ent.aliases,
+                    salience=ent.salience,
+                    description=ent.description,
+                    parent_doc_id=doc_id,
+                )
+                await self.graph_store.upsert_doc_entity_link(
+                    doc_id=doc_id,
+                    entity_id=entity_id,
+                    salience=ent.salience,
+                    mention_count_delta=1,
+                )
+                await self.sqlite_store.upsert_entity(
+                    entity_id=entity_id,
+                    canonical_name=ent.name,
+                    entity_type=ent.type,
+                    aliases=ent.aliases,
+                    description=ent.description,
+                    salience=ent.salience,
+                    embedding_id=entity_id,
+                )
+                await self.sqlite_store.upsert_doc_entity_link(
+                    doc_id=doc_id,
+                    entity_id=entity_id,
+                    mention_count_delta=1,
+                    first_chunk_id=result.chunk_id,
+                    salience=ent.salience,
+                )
+            # 2) relations（L1-L1）
+            for rel in result.extraction.relations:
+                await self._upsert_llm_relation_edge(
+                    rel=rel,
+                    entity_name_to_id=entity_name_to_id,
+                    chunk_id=result.chunk_id,
+                )
+
+        # 3) 构建跨文档 L0-L0 边
+        all_links = await self.sqlite_store.list_doc_entity_links()
+        await self.graph_store.build_cross_doc_edges(doc_entity_links=all_links)
+        await self.graph_store.persist()
 
         # 终态
         if summary.ok_chunks == 0:
@@ -329,3 +392,24 @@ class IngestPipeline:
             "total_completion_tokens": summary.total_completion_tokens,
             "total_cost_yuan": summary.total_cost_yuan,
         }
+
+    async def _upsert_llm_relation_edge(
+        self,
+        *,
+        rel: LlmRelation,
+        entity_name_to_id: dict[str, str],
+        chunk_id: str,
+    ) -> None:
+        """把单条 LLM relation 落到 GraphStore L1-L1 语义边。"""
+        head_id = entity_name_to_id.get(rel.head)
+        tail_id = entity_name_to_id.get(rel.tail)
+        if not head_id or not tail_id:
+            return
+        await self.graph_store.upsert_entity_edge_v2(
+            head_entity_id=head_id,
+            tail_entity_id=tail_id,
+            relation_type=rel.relation,
+            confidence=rel.confidence,
+            evidence=rel.evidence,
+            evidence_chunk_id=chunk_id,
+        )

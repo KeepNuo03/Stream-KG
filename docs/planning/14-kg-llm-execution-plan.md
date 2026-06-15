@@ -89,28 +89,28 @@
 
 > 目标：双层图（L0 文档 + L1 实体）的后端数据模型与 NetworkX 图重写。
 
-- [ ] **B.1** SQLite migration（沿用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 幂等风格）
+- [x] **B.1** SQLite migration（沿用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 幂等风格）
   - `entities` ADD COLUMN `salience REAL DEFAULT 0.5`
     - 注：`description` / `aliases_json` 在初始 schema 中已存在（`sqlite_store.py:106`），**仅加 salience**
   - `temporal_edges` ADD COLUMN `evidence TEXT` / `evidence_chunks_json TEXT` / `llm_confidence REAL`
   - 新表 `doc_entity_links (doc_id, entity_id, mention_count, first_chunk_id, salience_max)`
-- [ ] **B.2** `GraphStore.upsert_document_node(doc_id, doc_type, title)`：写入 L0 节点
-- [ ] **B.3** `GraphStore.upsert_doc_entity_link(doc_id, entity_id, salience)`：写入 L0→L1 containment 边
-- [ ] **B.4** `GraphStore.upsert_entity_edge_v2(head, tail, relation_type, evidence, llm_conf)`：semantic 边支持证据累加
-- [ ] **B.5** `GraphStore.export_graph` 重写：参数 `view_mode = "l0" | "l1" | "mixed"`，节点 attrs 加 `layer` / `parent_doc_id`
-- [ ] **B.6** 删除文档级联：移除 L0 节点 + 断开 L0-L1 + 释放孤立 L1（孤立 = 0 个 doc 关联）
-- [ ] **B.7** `build_cross_doc_edges()`：扫 `doc_entity_links`，共享 ≥3 个 salience≥0.5 的实体 → 生成 L0-L0 边
-- [ ] **B.8** `scripts/reset_kg.py`：清空 entities / mentions / edges / doc_entity_links / kg_extraction_logs + 删 graph.pkl
-- [ ] **B.9** `llm_extractor` 接入 `GraphStore.upsert_*`：抽取结果落图
-- [ ] **B.10** 单测：双层图导出 / 跨文档边构造 / 级联删除
-- [ ] **B.11** commit: `feat(kg): Phase B - 双层数据模型与图重构`
+- [x] **B.2** `GraphStore.upsert_document_node(doc_id, doc_type, title)`：写入 L0 节点
+- [x] **B.3** `GraphStore.upsert_doc_entity_link(doc_id, entity_id, salience)`：写入 L0→L1 containment 边
+- [x] **B.4** `GraphStore.upsert_entity_edge_v2(head, tail, relation_type, evidence, llm_conf)`：semantic 边支持证据累加
+- [x] **B.5** `GraphStore.export_graph` 重写：参数 `view_mode = "l0" | "l1" | "mixed"`，节点 attrs 加 `layer` / `parent_doc_id`
+- [x] **B.6** 删除文档级联：移除 L0 节点 + 断开 L0-L1 + 释放孤立 L1（孤立 = 0 个 doc 关联）
+- [x] **B.7** `build_cross_doc_edges()`：扫 `doc_entity_links`，共享 ≥3 个 salience≥0.5 的实体 → 生成 L0-L0 边
+- [x] **B.8** `scripts/reset_kg.py`：清空 entities / mentions / edges / doc_entity_links / kg_extraction_logs + 删 graph.pkl
+- [x] **B.9** `llm_extractor` 接入 `GraphStore.upsert_*`：抽取结果落图
+- [x] **B.10** 单测：双层图导出 / 跨文档边构造 / 级联删除
+- [x] **B.11** commit: `feat(kg): Phase B - 双层数据模型与图重构`
 
 **验收标准**：
 - 抽取 2 篇相关论文后，`/api/v1/graph?view=mixed` 返回包含 L0+L1+cross-doc 边
 - 删除 1 篇文档后，独占实体被清理，共享实体保留
 - `scripts/reset_kg.py` 跑完后 entities/edges/graph.pkl 全为空
 
-**进度**：0/11  **Commit**：—
+**进度**：11/11 ✅  **Commit**：(本批 commit)
 
 ---
 
@@ -193,11 +193,11 @@
 |-------|--------|------|------|--------|
 | A.0 PoC | 6 | 6 | ✅ 100% | (Phase A 同批 commit) |
 | A 抽取核心 | 11 | 11 | ✅ 100% | (本批 commit) |
-| B 数据模型 + 图 | 11 | 0 | 0% | — |
+| B 数据模型 + 图 | 11 | 11 | ✅ 100% | (本批 commit) |
 | C 规范化简化版 | 6 | 0 | 0% | — |
 | D 前端重做 | 9 | 0 | 0% | — |
 | E 监控错误处理 | 5 | 0 | 0% | — |
-| **合计** | **48** | **17** | **35%** | — |
+| **合计** | **48** | **28** | **58%** | — |
 
 ---
 
@@ -329,6 +329,7 @@
 | 2026-06-15 | Phase A.0 PoC 6/6 通过（§10） | prompt 一稿即用；deepseek-chat 在 attention 论文上 100% 覆盖、100% 解析、平均 5.47s；可放心进 Phase A |
 | 2026-06-15 | **Phase A 11/11 落地** | 47 个新单测全绿，0 回归；总 79/83（4 pre-existing 失败收 backlog）；§13 audit #8 修订 E1 默认值；§11 加 Phase A 监控指标实测数 + Backlog 表 |
 | 2026-06-15 | **Phase A smoke 端到端通过 + R-023 修复** | 14-chunk 论文真跑 24.4s / ¥0.033 / 143 entities + 104 relations / **14/14 ok**（修前 13/14）；R-023 修复 LLM 偶发凭空发明 entity/relation type 导致整 chunk 丢；4 个新单测 + §13 audit #11 |
+| 2026-06-15 | **Phase B 11/11 落地 + 最小前端适配提前** | 双层图后端模型（L0/L1 + mixed/l0/l1 导出 + cross-doc）完成；LLM 抽取已落图；新增 reset_kg 脚本；文档列表新增 kg_status + 抽取按钮；图谱页新增 view_mode 切换，未到 Phase D 的复杂交互留后续 |
 
 ---
 

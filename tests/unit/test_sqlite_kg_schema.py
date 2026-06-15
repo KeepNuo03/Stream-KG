@@ -193,6 +193,65 @@ async def test_kg_extraction_logs_cascade_on_doc_delete(db_path: str) -> None:
     assert stats_after["total"] == 0
 
 
+async def test_phase_b_columns_and_doc_entity_links(db_path: str) -> None:
+    """Phase B migration: entities.salience / temporal_edges evidence* / doc_entity_links."""
+    store = SQLiteStore(db_path)
+    await store.initialize()
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute("PRAGMA table_info(entities)") as cur:
+            entity_cols = {row[1] for row in await cur.fetchall()}
+        assert "salience" in entity_cols
+
+        async with db.execute("PRAGMA table_info(temporal_edges)") as cur:
+            edge_cols = {row[1] for row in await cur.fetchall()}
+        assert "evidence" in edge_cols
+        assert "evidence_chunks_json" in edge_cols
+        assert "llm_confidence" in edge_cols
+
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='doc_entity_links'"
+        ) as cur:
+            assert (await cur.fetchone()) is not None
+
+
+async def test_upsert_doc_entity_link_accumulates_counts_and_salience(db_path: str) -> None:
+    store = SQLiteStore(db_path)
+    await store.initialize()
+    await store.create_document(
+        doc_id="d1", title="t", doc_type="pdf", source_uri="file:///x.pdf"
+    )
+    # 外键依赖 entity
+    await store.upsert_entity(
+        entity_id="e1",
+        canonical_name="Transformer",
+        entity_type="method",
+        salience=0.6,
+    )
+    await store.upsert_doc_entity_link(
+        doc_id="d1",
+        entity_id="e1",
+        mention_count_delta=1,
+        first_chunk_id="c1",
+        salience=0.6,
+    )
+    await store.upsert_doc_entity_link(
+        doc_id="d1",
+        entity_id="e1",
+        mention_count_delta=2,
+        first_chunk_id="c2",
+        salience=0.9,
+    )
+    links = await store.list_doc_entity_links(doc_id="d1")
+    assert len(links) == 1
+    row = links[0]
+    assert row["doc_id"] == "d1"
+    assert row["entity_id"] == "e1"
+    assert row["mention_count"] == 3
+    # first_chunk 只保留首次
+    assert row["first_chunk_id"] == "c1"
+    assert row["salience_max"] == pytest.approx(0.9)
+
+
 # ---------- helpers ----------
 
 

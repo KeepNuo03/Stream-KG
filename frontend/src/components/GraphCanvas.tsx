@@ -7,6 +7,8 @@ export type GraphCanvasNode = {
   id: string;
   label: string;
   type: string;
+  layer?: "L0" | "L1";
+  parent_doc_id?: string | null;
   mention_count: number;
 };
 
@@ -29,9 +31,17 @@ type GraphCanvasProps = {
 };
 
 const RELATION_COLORS: Record<string, string> = {
+  shares_entity: "#475569",
   improves: "#16a34a",
   contradicts: "#dc2626",
   extends: "#2563eb",
+  proposes: "#0ea5e9",
+  uses: "#0d9488",
+  evaluates_on: "#f59e0b",
+  affiliated_with: "#f97316",
+  authors: "#14b8a6",
+  co_occurs: "#64748b",
+  part_of: "#6366f1",
   surveys: "#7c3aed",
   mentions: "#94a3b8",
 };
@@ -125,6 +135,7 @@ export function GraphCanvas({
           label: truncateLabel(node.label),
           fullLabel: node.label,
           type: node.type,
+          layer: node.layer ?? "L1",
           mentionCount: node.mention_count,
         },
       })),
@@ -161,6 +172,22 @@ export function GraphCanvas({
               height: 22,
               "border-width": 1,
               "border-color": "#c7d2fe",
+            },
+          },
+          {
+            selector: 'node[layer = "L0"]',
+            style: {
+              shape: "round-rectangle",
+              "background-color": "#dbeafe",
+              "border-color": "#60a5fa",
+              "border-width": 1.5,
+              color: "#1e3a8a",
+            },
+          },
+          {
+            selector: 'node[layer = "L1"]',
+            style: {
+              shape: "ellipse",
             },
           },
           {
@@ -213,7 +240,8 @@ export function GraphCanvas({
     const cy = cyRef.current;
     cy.nodes().forEach((node) => {
       const mentionCount = Number(node.data("mentionCount") || 1);
-      const size = nodeSize(mentionCount);
+      const layer = String(node.data("layer") || "L1");
+      const size = layer === "L0" ? 34 : nodeSize(mentionCount);
       node.style({ width: size, height: size });
     });
     cy.edges().forEach((edge) => {

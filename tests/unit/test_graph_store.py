@@ -97,8 +97,8 @@ async def test_export_connected_subgraph_skips_isolated_nodes(tmp_path: Path) ->
             ),
         )
 
-    await add_entity("entity-redis", "Redis", "doc-1", "chunk-1")
-    await add_entity("entity-bert", "BERT", "doc-1", "chunk-1")
+    await add_entity("entity-redis", "Transformer", "doc-1", "chunk-1")
+    await add_entity("entity-bert", "Attention", "doc-1", "chunk-1")
     await add_entity("entity-alone", "Kubernetes", "doc-1", "chunk-2")
 
     await store.add_temporal_edge(
@@ -120,3 +120,69 @@ async def test_export_connected_subgraph_skips_isolated_nodes(tmp_path: Path) ->
     assert "entity-bert" in node_ids
     assert "entity-alone" not in node_ids
     assert exported["stats"]["edge_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_export_view_modes_l0_l1_mixed(tmp_path: Path) -> None:
+    graph_path = tmp_path / "graph.pkl"
+    store = GraphStore(str(graph_path))
+    await store.initialize()
+    await store.upsert_document_node(doc_id="d1", doc_type="pdf", title="Doc One")
+    await store.upsert_document_node(doc_id="d2", doc_type="pdf", title="Doc Two")
+    await store.upsert_entity_node(
+        entity_id="e1",
+        canonical_name="Transformer",
+        entity_type="method",
+        doc_id="d1",
+        chunk_id="c1",
+        salience=0.8,
+        parent_doc_id="d1",
+    )
+    await store.upsert_entity_node(
+        entity_id="e2",
+        canonical_name="Attention",
+        entity_type="method",
+        doc_id="d2",
+        chunk_id="c2",
+        salience=0.7,
+        parent_doc_id="d2",
+    )
+    await store.upsert_doc_entity_link(doc_id="d1", entity_id="e1", salience=0.8)
+    await store.upsert_doc_entity_link(doc_id="d2", entity_id="e2", salience=0.7)
+    await store.upsert_entity_edge_v2(
+        head_entity_id="e1",
+        tail_entity_id="e2",
+        relation_type="improves",
+        confidence=0.82,
+        evidence_chunk_id="c1",
+    )
+    # cross-doc
+    await store.build_cross_doc_edges(
+        doc_entity_links=[
+            {"doc_id": "d1", "entity_id": "e_shared_1", "salience_max": 0.7},
+            {"doc_id": "d1", "entity_id": "e_shared_2", "salience_max": 0.8},
+            {"doc_id": "d1", "entity_id": "e_shared_3", "salience_max": 0.9},
+            {"doc_id": "d2", "entity_id": "e_shared_1", "salience_max": 0.7},
+            {"doc_id": "d2", "entity_id": "e_shared_2", "salience_max": 0.8},
+            {"doc_id": "d2", "entity_id": "e_shared_3", "salience_max": 0.9},
+        ]
+    )
+    await store.persist()
+
+    l1 = await store.export_graph(view_mode="l1", min_mentions=1, relation_type="all")
+    assert l1["stats"]["view_mode"] == "l1"
+    assert all(node["layer"] == "L1" for node in l1["nodes"])
+    assert any(edge["relation_type"] == "improves" for edge in l1["edges"])
+
+    l0 = await store.export_graph(view_mode="l0", min_mentions=1, relation_type="all")
+    assert l0["stats"]["view_mode"] == "l0"
+    assert all(node["layer"] == "L0" for node in l0["nodes"])
+    assert any(edge["relation_type"] == "shares_entity" for edge in l0["edges"])
+
+    mixed = await store.export_graph(view_mode="mixed", min_mentions=1, relation_type="all")
+    assert mixed["stats"]["view_mode"] == "mixed"
+    layers = {node["layer"] for node in mixed["nodes"]}
+    assert layers == {"L0", "L1"}
+    rels = {edge["relation_type"] for edge in mixed["edges"]}
+    assert "mentions" in rels
+    assert "improves" in rels

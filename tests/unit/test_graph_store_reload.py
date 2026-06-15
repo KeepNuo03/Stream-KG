@@ -22,8 +22,8 @@ async def test_export_reloads_updated_graph_from_disk(tmp_path: Path) -> None:
     writer = GraphStore(str(path))
     graph = nx.MultiDiGraph()
     # R-015 后导出仅保留连通子图，构造一对带边的节点确保热加载结果可观测
-    graph.add_node("n1", label="Redis", entity_type="method", mention_count=3, doc_ids=["d1"])
-    graph.add_node("n2", label="BERT", entity_type="method", mention_count=2, doc_ids=["d1"])
+    graph.add_node("n1", label="Transformer", entity_type="method", mention_count=3, doc_ids=["d1"])
+    graph.add_node("n2", label="Attention", entity_type="method", mention_count=2, doc_ids=["d1"])
     graph.add_edge(
         "n1",
         "n2",

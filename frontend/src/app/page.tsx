@@ -30,6 +30,8 @@ type DocumentItem = {
   title: string;
   doc_type: "pdf" | "web";
   status: "pending" | "processing" | "ready" | "failed";
+  kg_status?: "unprocessed" | "extracting" | "ready" | "failed";
+  kg_error_message?: string | null;
   page_count?: number | null;
   chunk_count: number;
   error_message?: string | null;
@@ -74,7 +76,15 @@ type RetrievalMeta = {
 };
 type BatchDeleteFailedItem = { doc_id: string; code: string; message: string };
 type BatchDeleteResponse = { requested: number; deleted: number; failed: BatchDeleteFailedItem[] };
-type GraphNode = { id: string; label: string; type: string; doc_count: number; mention_count: number };
+type GraphNode = {
+  id: string;
+  label: string;
+  type: string;
+  layer?: "L0" | "L1";
+  parent_doc_id?: string | null;
+  doc_count: number;
+  mention_count: number;
+};
 type GraphEdge = {
   id: string;
   source: string;
@@ -87,7 +97,7 @@ type GraphEdge = {
 type GraphData = {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  stats: { node_count: number; edge_count: number };
+  stats: { node_count: number; edge_count: number; view_mode?: string };
   placeholder: boolean;
 };
 type EntityDetail = {
@@ -120,6 +130,13 @@ const relationTypeLabel: Record<string, string> = {
 
 function localizeRelation(type: string): string {
   return relationTypeLabel[type] ?? type;
+}
+
+function localizeKgStatus(status: DocumentItem["kg_status"] | undefined): string {
+  if (status === "extracting") return "知识提取中";
+  if (status === "ready") return "知识已就绪";
+  if (status === "failed") return "知识提取失败";
+  return "未提取";
 }
 
 function ResizeHandle() {
@@ -283,6 +300,7 @@ export default function HomePage() {
   const [graphError, setGraphError] = useState<string | null>(null);
   const [graphDocFilter, setGraphDocFilter] = useState<string>("all");
   const [relationFilter, setRelationFilter] = useState<string>("balanced");
+  const [graphViewMode, setGraphViewMode] = useState<"mixed" | "l1" | "l0">("mixed");
   const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
   const [entityDetail, setEntityDetail] = useState<EntityDetail | null>(null);
   const [loadingEntityDetail, setLoadingEntityDetail] = useState(false);
@@ -338,6 +356,7 @@ export default function HomePage() {
     }
     try {
       const params = new URLSearchParams({
+        view_mode: graphViewMode,
         limit_nodes: "36",
         min_mentions: "2",
         max_edges: "48",
@@ -361,7 +380,7 @@ export default function HomePage() {
         setLoadingGraph(false);
       }
     }
-  }, [graphDocFilter, relationFilter]);
+  }, [graphDocFilter, relationFilter, graphViewMode]);
 
   const loadEntityDetail = useCallback(async (entityId: string | null) => {
     setSelectedEntityId(entityId);
@@ -496,6 +515,29 @@ export default function HomePage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "重处理失败";
       toast.show({ kind: "error", message: "重处理失败", detail: message });
+    }
+  }
+
+  async function onExtractKg(doc: DocumentItem) {
+    if (doc.status !== "ready" || deleting) return;
+    try {
+      const res = await fetch(`${API_BASE}/documents/${doc.doc_id}/extract-kg`, {
+        method: "POST",
+      });
+      if (res.status !== 202) {
+        const detail = await res.text();
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      toast.show({
+        kind: "info",
+        message: `已触发知识抽取：《${doc.title}》`,
+        detail: "可在文档卡片的知识状态查看进度",
+      });
+      await refreshDocuments();
+      await refreshGraph(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "知识抽取触发失败";
+      toast.show({ kind: "error", message: "知识抽取失败", detail: message });
     }
   }
 
@@ -966,11 +1008,31 @@ export default function HomePage() {
                           {statusMeta[doc.status].label}
                         </span>
                       </div>
+                      <div className="mt-2 flex items-center gap-2 text-[11px]">
+                        <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-700 ring-1 ring-indigo-100">
+                          {localizeKgStatus(doc.kg_status)}
+                        </span>
+                        {doc.status === "ready" && (
+                          <button
+                            className="rounded-full border border-indigo-200 px-2 py-0.5 text-indigo-700 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => void onExtractKg(doc)}
+                            disabled={doc.kg_status === "extracting" || deleting}
+                          >
+                            {doc.kg_status === "extracting" ? "提取中..." : "抽取知识"}
+                          </button>
+                        )}
+                      </div>
                       <div className="mt-2 text-xs text-slate-500">Chunks: {doc.chunk_count}</div>
                       {doc.status === "failed" && doc.error_message && (
                         <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50/80 px-2 py-1 text-[11px] leading-relaxed text-rose-700">
                           <span className="font-semibold">失败原因：</span>
                           <span className="break-words">{doc.error_message}</span>
+                        </div>
+                      )}
+                      {doc.kg_status === "failed" && doc.kg_error_message && (
+                        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50/80 px-2 py-1 text-[11px] leading-relaxed text-amber-700">
+                          <span className="font-semibold">知识提取失败：</span>
+                          <span className="break-words">{doc.kg_error_message}</span>
                         </div>
                       )}
                     </div>
@@ -1053,6 +1115,18 @@ export default function HomePage() {
                     </select>
                   </label>
                   <label className="inline-flex items-center gap-1 text-slate-600">
+                    视图
+                    <select
+                      className="rounded-lg border border-slate-300 bg-white px-2 py-1"
+                      value={graphViewMode}
+                      onChange={(e) => setGraphViewMode(e.target.value as "mixed" | "l1" | "l0")}
+                    >
+                      <option value="mixed">混合视图（L0+L1）</option>
+                      <option value="l1">实体视图（L1）</option>
+                      <option value="l0">文档视图（L0）</option>
+                    </select>
+                  </label>
+                  <label className="inline-flex items-center gap-1 text-slate-600">
                     关系
                     <select
                       className="rounded-lg border border-slate-300 bg-white px-2 py-1"
@@ -1071,6 +1145,7 @@ export default function HomePage() {
                   </label>
                   <span className="text-slate-500">
                     节点 {graphData.stats.node_count} · 边 {graphData.stats.edge_count}
+                    {graphViewMode === "mixed" ? " · 双层混合" : graphViewMode === "l0" ? " · 文档层" : " · 实体层"}
                     {relationFilter === "semantic" ? " · 仅语义边" : ""}
                     {relationFilter === "balanced" ? " · 连通子图 · 术语优先" : ""}
                   </span>

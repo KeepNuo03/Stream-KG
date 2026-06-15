@@ -140,6 +140,7 @@ class SQLiteStore:
                     entity_type     TEXT NOT NULL,
                     aliases_json    TEXT NOT NULL DEFAULT '[]',
                     description     TEXT,
+                    salience        REAL NOT NULL DEFAULT 0.5,
                     embedding_id    TEXT,
                     first_seen_at   TEXT NOT NULL,
                     last_updated_at TEXT NOT NULL
@@ -163,6 +164,9 @@ class SQLiteStore:
                     tail_entity_id      TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
                     relation_type       TEXT NOT NULL,
                     evidence_chunk_id   TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+                    evidence            TEXT,
+                    evidence_chunks_json TEXT NOT NULL DEFAULT '[]',
+                    llm_confidence      REAL,
                     confidence          REAL NOT NULL,
                     valid_from          TEXT,
                     created_at          TEXT NOT NULL,
@@ -189,6 +193,18 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_kg_logs_doc ON kg_extraction_logs(doc_id);
                 CREATE INDEX IF NOT EXISTS idx_kg_logs_status ON kg_extraction_logs(status, created_at);
+
+                -- P3-X · Phase B：文档-实体关联表（L0-L1）
+                CREATE TABLE IF NOT EXISTS doc_entity_links (
+                    doc_id           TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+                    entity_id        TEXT NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
+                    mention_count    INTEGER NOT NULL DEFAULT 0,
+                    first_chunk_id   TEXT,
+                    salience_max     REAL NOT NULL DEFAULT 0.0,
+                    PRIMARY KEY (doc_id, entity_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_doc_entity_links_doc ON doc_entity_links(doc_id);
+                CREATE INDEX IF NOT EXISTS idx_doc_entity_links_entity ON doc_entity_links(entity_id);
                 """
             )
 
@@ -208,6 +224,27 @@ class SQLiteStore:
                 await db.execute(
                     "ALTER TABLE documents ADD COLUMN kg_error_message TEXT"
                 )
+
+            # Phase B：entities 补 salience（兼容旧库）
+            async with db.execute("PRAGMA table_info(entities)") as cur:
+                entity_cols = {row[1] for row in await cur.fetchall()}
+            if "salience" not in entity_cols:
+                await db.execute(
+                    "ALTER TABLE entities ADD COLUMN salience REAL NOT NULL DEFAULT 0.5"
+                )
+
+            # Phase B：temporal_edges 补证据字段（兼容旧库）
+            async with db.execute("PRAGMA table_info(temporal_edges)") as cur:
+                edge_cols = {row[1] for row in await cur.fetchall()}
+            if "evidence" not in edge_cols:
+                await db.execute("ALTER TABLE temporal_edges ADD COLUMN evidence TEXT")
+            if "evidence_chunks_json" not in edge_cols:
+                await db.execute(
+                    "ALTER TABLE temporal_edges ADD COLUMN evidence_chunks_json TEXT "
+                    "NOT NULL DEFAULT '[]'"
+                )
+            if "llm_confidence" not in edge_cols:
+                await db.execute("ALTER TABLE temporal_edges ADD COLUMN llm_confidence REAL")
 
             await db.commit()
 
@@ -497,6 +534,7 @@ class SQLiteStore:
         entity_type: str,
         aliases: list[str] | None = None,
         description: str | None = None,
+        salience: float | None = None,
         embedding_id: str | None = None,
     ) -> None:
         """写入或更新实体元数据。"""
@@ -531,6 +569,7 @@ class SQLiteStore:
                         entity_type = ?,
                         aliases_json = ?,
                         description = COALESCE(?, description),
+                        salience = MAX(COALESCE(?, salience), salience),
                         embedding_id = COALESCE(?, embedding_id),
                         last_updated_at = ?
                     WHERE entity_id = ?
@@ -540,6 +579,7 @@ class SQLiteStore:
                         entity_type,
                         json.dumps(merged_aliases, ensure_ascii=False),
                         description,
+                        salience,
                         embedding_id,
                         now,
                         entity_id,
@@ -550,9 +590,9 @@ class SQLiteStore:
                     """
                     INSERT INTO entities(
                         entity_id, canonical_name, entity_type, aliases_json,
-                        description, embedding_id, first_seen_at, last_updated_at
+                        description, salience, embedding_id, first_seen_at, last_updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         entity_id,
@@ -560,6 +600,7 @@ class SQLiteStore:
                         entity_type,
                         json.dumps(aliases or [], ensure_ascii=False),
                         description,
+                        salience if salience is not None else 0.5,
                         embedding_id,
                         now,
                         now,
@@ -593,18 +634,27 @@ class SQLiteStore:
 
     async def upsert_temporal_edge(self, edge: TemporalEdge) -> None:
         """写入或更新时序关系边。"""
+        evidence_chunks_json = (
+            json.dumps([edge.evidence_chunk_id], ensure_ascii=False)
+            if edge.evidence_chunk_id
+            else "[]"
+        )
         async with self._connection() as db:
             await db.execute(
                 """
                 INSERT INTO temporal_edges(
                     edge_id, head_entity_id, tail_entity_id, relation_type,
-                    evidence_chunk_id, confidence, valid_from, created_at
+                    evidence_chunk_id, evidence, evidence_chunks_json, llm_confidence,
+                    confidence, valid_from, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(head_entity_id, tail_entity_id, relation_type)
                 DO UPDATE SET
                     edge_id = excluded.edge_id,
                     evidence_chunk_id = excluded.evidence_chunk_id,
+                    evidence = COALESCE(excluded.evidence, temporal_edges.evidence),
+                    evidence_chunks_json = excluded.evidence_chunks_json,
+                    llm_confidence = COALESCE(excluded.llm_confidence, temporal_edges.llm_confidence),
                     confidence = excluded.confidence,
                     created_at = excluded.created_at
                 """,
@@ -614,12 +664,65 @@ class SQLiteStore:
                     edge.tail_entity_id,
                     edge.relation_type,
                     edge.evidence_chunk_id,
+                    None,
+                    evidence_chunks_json,
+                    edge.confidence,
                     edge.confidence,
                     None,
                     edge.created_at.isoformat(),
                 ),
             )
             await db.commit()
+
+    async def upsert_doc_entity_link(
+        self,
+        *,
+        doc_id: str,
+        entity_id: str,
+        mention_count_delta: int = 1,
+        first_chunk_id: str | None = None,
+        salience: float = 0.0,
+    ) -> None:
+        """Upsert 文档-实体关联（L0-L1 containment 元数据）。"""
+        async with self._connection() as db:
+            await db.execute(
+                """
+                INSERT INTO doc_entity_links(
+                    doc_id, entity_id, mention_count, first_chunk_id, salience_max
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id, entity_id)
+                DO UPDATE SET
+                    mention_count = doc_entity_links.mention_count + excluded.mention_count,
+                    first_chunk_id = COALESCE(doc_entity_links.first_chunk_id, excluded.first_chunk_id),
+                    salience_max = MAX(doc_entity_links.salience_max, excluded.salience_max)
+                """,
+                (
+                    doc_id,
+                    entity_id,
+                    max(mention_count_delta, 0),
+                    first_chunk_id,
+                    salience,
+                ),
+            )
+            await db.commit()
+
+    async def list_doc_entity_links(self, *, doc_id: str | None = None) -> list[dict[str, Any]]:
+        """返回 doc_entity_links（可按 doc_id 过滤）。"""
+        where = "WHERE doc_id = ?" if doc_id else ""
+        args: tuple[Any, ...] = (doc_id,) if doc_id else ()
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT doc_id, entity_id, mention_count, first_chunk_id, salience_max
+                FROM doc_entity_links
+                {where}
+                ORDER BY salience_max DESC, mention_count DESC
+                """,
+                args,
+            )
+        return [dict(row) for row in rows]
 
     async def list_entities_by_doc(self, doc_id: str) -> list[dict[str, Any]]:
         """列出与文档关联的实体。"""

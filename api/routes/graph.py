@@ -12,6 +12,7 @@ router = APIRouter()
 @router.get("")
 async def get_graph(
     doc_id: str | None = None,
+    view_mode: str = "mixed",
     limit_nodes: int = 36,
     min_mentions: int = 2,
     relation_type: str | None = "balanced",
@@ -29,6 +30,7 @@ async def get_graph(
     await graph_store.initialize()
     return await graph_store.export_graph(
         doc_id=doc_id,
+        view_mode=view_mode,
         limit_nodes=min(limit_nodes, 96),
         min_mentions=max(min_mentions, 1),
         relation_type=relation_type,
