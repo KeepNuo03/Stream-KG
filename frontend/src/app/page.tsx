@@ -571,14 +571,21 @@ export default function HomePage() {
   }
 
   async function onUploadFile(file: File) {
-    // 上传 PDF：后端返回 202 后立即刷新列表，靠轮询拿状态变化。
     setUploading(true);
     try {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("title", file.name.replace(/\.pdf$/i, ""));
-      await fetch(`${API_BASE}/documents/upload`, { method: "POST", body: formData });
-      await refreshDocuments();
+      const res = await fetch(`${API_BASE}/documents/upload`, { method: "POST", body: formData });
+      if (res.status !== 202) {
+        const detail = await res.text();
+        throw new Error(detail || `上传失败（${res.status}）`);
+      }
+      toast.show({ kind: "success", message: "已加入处理队列", detail: file.name });
+      void refreshDocuments();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "上传失败";
+      toast.show({ kind: "error", message: "上传失败", detail: message });
     } finally {
       setUploading(false);
     }
@@ -589,13 +596,21 @@ export default function HomePage() {
     if (!urlInput.trim()) return;
     setUploading(true);
     try {
-      await fetch(`${API_BASE}/documents/import-url`, {
+      const res = await fetch(`${API_BASE}/documents/import-url`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: urlInput.trim() }),
       });
+      if (res.status !== 202) {
+        const detail = await res.text();
+        throw new Error(detail || `导入失败（${res.status}）`);
+      }
       setUrlInput("");
-      await refreshDocuments();
+      toast.show({ kind: "success", message: "已加入处理队列" });
+      void refreshDocuments();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "导入失败";
+      toast.show({ kind: "error", message: "URL 导入失败", detail: message });
     } finally {
       setUploading(false);
     }
@@ -688,6 +703,8 @@ export default function HomePage() {
 
     setDeleting(true);
     setBatchDeleteFailed([]);
+    const prevDocuments = documents;
+    setDocuments((prev) => prev.filter((d) => d.doc_id !== doc.doc_id));
     try {
       const res = await fetch(`${API_BASE}/documents/${doc.doc_id}`, { method: "DELETE" });
       if (res.status !== 204) {
@@ -699,9 +716,10 @@ export default function HomePage() {
         next.delete(doc.doc_id);
         return next;
       });
-      await refreshDocuments();
       toast.show({ kind: "success", message: `已删除《${doc.title}》` });
+      void refreshDocuments();
     } catch (error) {
+      setDocuments(prevDocuments);
       const message = error instanceof Error ? error.message : "文档删除失败，请稍后重试。";
       toast.show({ kind: "error", message: "删除失败", detail: message });
     } finally {

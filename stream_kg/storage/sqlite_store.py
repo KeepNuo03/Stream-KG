@@ -825,6 +825,59 @@ class SQLiteStore:
                 row = await cur.fetchone()
         return int(row[0]) if row else 0
 
+    async def count_chunks_by_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """批量统计各文档 chunk 数量（列表接口用，避免拉全量 content）。"""
+        if not doc_ids:
+            return {}
+        placeholders = ",".join(["?"] * len(doc_ids))
+        async with self._connection() as db:
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT doc_id, COUNT(*) AS cnt
+                FROM chunks
+                WHERE doc_id IN ({placeholders})
+                GROUP BY doc_id
+                """,
+                tuple(doc_ids),
+            )
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    async def count_entities_by_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """批量统计各文档关联实体数量。"""
+        if not doc_ids:
+            return {}
+        placeholders = ",".join(["?"] * len(doc_ids))
+        async with self._connection() as db:
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT doc_id, COUNT(DISTINCT entity_id) AS cnt
+                FROM entity_mentions
+                WHERE doc_id IN ({placeholders})
+                GROUP BY doc_id
+                """,
+                tuple(doc_ids),
+            )
+        return {str(row[0]): int(row[1]) for row in rows}
+
+    async def filter_entities_without_mentions(self, entity_ids: list[str]) -> list[str]:
+        """从候选实体中筛出已无 mention 的 ID（删除文档后清理用）。"""
+        if not entity_ids:
+            return []
+        placeholders = ",".join(["?"] * len(entity_ids))
+        async with self._connection() as db:
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT e.entity_id
+                FROM entities e
+                WHERE e.entity_id IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1 FROM entity_mentions m WHERE m.entity_id = e.entity_id
+                  )
+                """,
+                tuple(entity_ids),
+            )
+        return [str(row[0]) for row in rows]
+
     async def list_orphan_entity_ids(self) -> list[str]:
         """返回没有任何 mention 的实体 ID。"""
         async with self._connection() as db:

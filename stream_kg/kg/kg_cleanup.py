@@ -38,11 +38,11 @@ class KgCleanupService:
 
         await self.graph_store.initialize()
         removed_entity_ids = await self.graph_store.remove_document(doc_id, chunk_ids=chunk_ids)
-        await self.graph_store.persist()
 
         await self.sqlite_store.delete_document(doc_id)
 
-        await self._purge_orphan_entities(seed_entity_ids=removed_entity_ids)
+        await self._purge_entities_without_mentions(removed_entity_ids)
+        asyncio.create_task(self.graph_store.persist())
 
     async def cleanup_for_reprocess(self, doc_id: str) -> None:
         """重处理前清掉与文档相关的 KG 数据，**保留** documents 行。
@@ -63,7 +63,6 @@ class KgCleanupService:
 
         await self.graph_store.initialize()
         removed_entity_ids = await self.graph_store.remove_document(doc_id, chunk_ids=chunk_ids)
-        await self.graph_store.persist()
 
         await asyncio.to_thread(self.qdrant_store.delete_chunks_by_doc, doc_id)
 
@@ -76,12 +75,12 @@ class KgCleanupService:
             doc_id, "unprocessed", error_message=None
         )
 
-        await self._purge_orphan_entities(seed_entity_ids=removed_entity_ids)
+        await self._purge_entities_without_mentions(removed_entity_ids)
+        asyncio.create_task(self.graph_store.persist())
 
-    async def _purge_orphan_entities(self, *, seed_entity_ids: list[str]) -> None:
-        """删除孤立实体（无任何 mention 的）+ 顺带清理它们的 Qdrant 向量。"""
-        orphan_ids = await self.sqlite_store.list_orphan_entity_ids()
-        to_delete = sorted(set(seed_entity_ids) | set(orphan_ids))
+    async def _purge_entities_without_mentions(self, entity_ids: list[str]) -> None:
+        """仅清理候选实体中已无 mention 的项（避免每次全表扫 orphan）。"""
+        to_delete = await self.sqlite_store.filter_entities_without_mentions(entity_ids)
         for entity_id in to_delete:
             try:
                 await asyncio.to_thread(self.qdrant_store.delete_entity, entity_id)

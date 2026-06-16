@@ -93,6 +93,17 @@ def _error_code_from_status(status_code: int) -> str:
     return "DOCUMENT_DELETE_FAILED"
 
 
+def _cleanup_document_files_best_effort(source_uri: str, doc_type: str) -> None:
+    """后台清理本地上传 PDF 与 MinerU 输出目录。"""
+    if doc_type == "pdf":
+        file_path = Path(source_uri)
+        if file_path.exists():
+            file_path.unlink(missing_ok=True)
+    parsed_dir = Path(settings.mineru_output_dir) / Path(source_uri).stem
+    if parsed_dir.exists() and parsed_dir.is_dir():
+        shutil.rmtree(parsed_dir, ignore_errors=True)
+
+
 async def _delete_document_with_cascade(doc_id: str, *, background_tasks: BackgroundTasks | None = None) -> None:
     """删除单文档及其关联资源（供单删/批删复用）。"""
     sqlite_store = get_sqlite_store()
@@ -108,20 +119,21 @@ async def _delete_document_with_cascade(doc_id: str, *, background_tasks: Backgr
     else:
         await sqlite_store.delete_document(doc_id)
 
-    # 向量清理放到后台，避免删除接口被 Qdrant 慢请求阻塞。
+    # 向量与本地文件清理放到后台，避免删除接口被 IO 阻塞。
     if background_tasks is not None:
         background_tasks.add_task(_delete_vectors_best_effort, doc_id)
+        background_tasks.add_task(
+            _cleanup_document_files_best_effort,
+            document.source_uri,
+            document.doc_type,
+        )
     else:
         await asyncio.to_thread(_delete_vectors_best_effort, doc_id)
-
-    # 文件系统清理：即使失败也不影响主删除流程结果。
-    if document.doc_type == "pdf":
-        file_path = Path(document.source_uri)
-        if file_path.exists():
-            file_path.unlink(missing_ok=True)
-    parsed_dir = Path(settings.mineru_output_dir) / Path(document.source_uri).stem
-    if parsed_dir.exists() and parsed_dir.is_dir():
-        shutil.rmtree(parsed_dir, ignore_errors=True)
+        await asyncio.to_thread(
+            _cleanup_document_files_best_effort,
+            document.source_uri,
+            document.doc_type,
+        )
 
 
 @router.post("/upload", status_code=202, response_model=DocumentQueuedResponse)
@@ -208,14 +220,14 @@ async def list_documents(
     sqlite_store = get_sqlite_store()
     documents, total = await sqlite_store.list_documents(status=status, limit=limit, offset=offset)
 
+    doc_ids = [document.doc_id for document in documents]
+    chunk_counts = await sqlite_store.count_chunks_by_docs(doc_ids)
+    entity_counts: dict[str, int] = {}
+    if settings.feature_kg_enabled and doc_ids:
+        entity_counts = await sqlite_store.count_entities_by_docs(doc_ids)
+
     summaries: list[DocumentSummary] = []
     for document in documents:
-        chunks = await sqlite_store.list_chunks_by_doc(document.doc_id)
-        entity_count = (
-            await sqlite_store.count_entities_by_doc(document.doc_id)
-            if settings.feature_kg_enabled
-            else 0
-        )
         summaries.append(
             DocumentSummary(
                 doc_id=document.doc_id,
@@ -224,8 +236,8 @@ async def list_documents(
                 status=document.status,
                 page_count=document.page_count,
                 ingested_at=document.ingested_at,
-                chunk_count=len(chunks),
-                entity_count=entity_count,
+                chunk_count=chunk_counts.get(document.doc_id, 0),
+                entity_count=entity_counts.get(document.doc_id, 0),
                 error_message=document.error_message,
             )
         )
