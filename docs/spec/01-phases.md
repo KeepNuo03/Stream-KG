@@ -1,5 +1,11 @@
 # 01 — 分阶段交付
 
+## 当前状态（2026-06-16）
+
+- MVP 主链路已可演示：导入 → 问答（citation）→ PDF 引用跳转 → 图谱查看/边解释 → citation 定位图谱实体。
+- 双画布与 KG 增量能力已落地（含冲突边、Toast、关系解释、中文化 UI、文档性能优化）。
+- 当前主要缺口已收敛到 Phase 4：多轮上下文记忆、历史会话列表、新建/切换会话。
+
 ## Phase 1 — Basic RAG（Week 1–2）
 
 **Flags**: 全部 `false`
@@ -47,18 +53,20 @@
 | Query Router | 关键词 → hybrid（**MVP 阶段标记为 deferred**：graph 检索通道未启用前 router 无意义，避免空转） |
 | Reranker | Qwen3-Reranker 本地 :8082 按需加载，`FEATURE_RERANKER_ENABLED` 控制启用 |
 | 引用跳转 | citation chip + 弹窗展示完整 chunk + 「打开原 PDF」直链 |
+| 对话↔图谱联动 v2 | citation 返回实体并支持一键定位图谱实体节点（命中失败回退文档锚定） |
 
 **验收**：
 
 - [ ] ~~「对比/演变」类 query 走 hybrid~~（MVP 不做，见 spec 12-agent-roadmap P4.1） |
 - [x] Reranker 服务可启用：embedding/reranker 客户端均带熔断、失败不污染主链路
 - [x] 点击 citation 跳转原文 chunk（弹窗）+ 一键打开原 PDF
+- [x] citation 可一键定位到图谱实体节点（含无实体/未命中回退提示）
 
 ## Phase 4 — Agent Layer（Planned，不在 MVP）
 
 **Status**: `planned` — 详见 [12-agent-roadmap.md](12-agent-roadmap.md)
 
-**目标**：将单轨 RAG 升级为多轨道个人知识 Agent（闲聊 / 元数据 / 浏览 / 事实查询 / 任务 / 澄清 / 回忆），在 grounded 前提下实现自然对话，避免 R-017/R-018 类结构性误判。
+**目标**：将单轨 RAG 升级为多轨道个人知识 Agent（闲聊 / 元数据 / 浏览 / 事实查询 / 任务 / 澄清 / 回忆），在 grounded 前提下实现自然对话，避免 R-017/R-018 类结构性误判；优先补齐多轮上下文记忆与历史会话能力。
 
 **Flags（规划）**：`FEATURE_AGENT_ENABLED`（默认 false，实施时补充至 [07-config.md](07-config.md)）
 
