@@ -859,6 +859,43 @@ class SQLiteStore:
             )
         return {str(row[0]): int(row[1]) for row in rows}
 
+    async def list_chunk_entities_by_ids(self, chunk_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+        """按 chunk_id 批量返回关联实体（用于 citation→图谱联动）。"""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join(["?"] * len(chunk_ids))
+        async with self._connection() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await db.execute_fetchall(
+                f"""
+                SELECT
+                    m.chunk_id AS chunk_id,
+                    e.entity_id AS entity_id,
+                    e.canonical_name AS label,
+                    e.entity_type AS entity_type,
+                    COUNT(*) AS mention_count
+                FROM entity_mentions m
+                JOIN entities e ON e.entity_id = m.entity_id
+                WHERE m.chunk_id IN ({placeholders})
+                GROUP BY m.chunk_id, e.entity_id, e.canonical_name, e.entity_type
+                ORDER BY m.chunk_id ASC, mention_count DESC, e.canonical_name ASC
+                """,
+                tuple(chunk_ids),
+            )
+
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            chunk_id = str(row["chunk_id"])
+            grouped.setdefault(chunk_id, []).append(
+                {
+                    "entity_id": str(row["entity_id"]),
+                    "label": str(row["label"]),
+                    "entity_type": str(row["entity_type"]),
+                    "mention_count": int(row["mention_count"]),
+                }
+            )
+        return grouped
+
     async def filter_entities_without_mentions(self, entity_ids: list[str]) -> list[str]:
         """从候选实体中筛出已无 mention 的 ID（删除文档后清理用）。"""
         if not entity_ids:

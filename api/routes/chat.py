@@ -37,6 +37,19 @@ from stream_kg.retrieval.relevance_gate import assess_retrieval, should_use_evid
 router = APIRouter()
 
 
+def _citation_payload(citation: Citation) -> dict[str, object]:
+    return {
+        "citation_id": citation.citation_id,
+        "doc_id": citation.doc_id,
+        "chunk_id": citation.chunk_id,
+        "doc_title": citation.doc_title,
+        "snippet": citation.snippet,
+        "page_num": citation.page_num,
+        "section_title": citation.section_title,
+        "entities": citation.entities,
+    }
+
+
 @router.post("/sessions", status_code=201, response_model=CreateSessionResponse)
 async def create_session() -> CreateSessionResponse:
     """创建一个新会话并写入 SQLite。"""
@@ -348,10 +361,18 @@ async def send_message(session_id: str, body: ChatMessageRequest) -> EventSource
 
         # 将引用索引映射为可展示 citation 信息。
         citations: list[Citation] = []
+        citation_chunks: list[RetrievalChunk] = []
         for citation_index, source_index in enumerate(used_indexes, start=1):
             if source_index - 1 >= len(ranked_chunks):
                 continue
-            chunk = ranked_chunks[source_index - 1].chunk
+            retrieval_chunk = ranked_chunks[source_index - 1]
+            citation_chunks.append(retrieval_chunk)
+
+        chunk_entities_map = await sqlite_store.list_chunk_entities_by_ids(
+            [item.chunk.chunk_id for item in citation_chunks]
+        )
+        for citation_index, retrieval_chunk in enumerate(citation_chunks, start=1):
+            chunk = retrieval_chunk.chunk
             document = await sqlite_store.get_document(chunk.doc_id)
             citations.append(
                 Citation(
@@ -362,24 +383,14 @@ async def send_message(session_id: str, body: ChatMessageRequest) -> EventSource
                     snippet=chunk.content[:200],
                     page_num=chunk.page_num,
                     section_title=chunk.section_title,
+                    entities=chunk_entities_map.get(chunk.chunk_id, []),
                 )
             )
 
         for citation in citations:
             yield {
                 "event": "citation",
-                "data": json.dumps(
-                    {
-                        "citation_id": citation.citation_id,
-                        "doc_id": citation.doc_id,
-                        "chunk_id": citation.chunk_id,
-                        "doc_title": citation.doc_title,
-                        "snippet": citation.snippet,
-                        "page_num": citation.page_num,
-                        "section_title": citation.section_title,
-                    },
-                    ensure_ascii=False,
-                ),
+                "data": json.dumps(_citation_payload(citation), ensure_ascii=False),
             }
 
         # 流式输出完成后持久化 assistant 消息与 citations。
@@ -390,18 +401,7 @@ async def send_message(session_id: str, body: ChatMessageRequest) -> EventSource
             role="assistant",
             content=assistant_text,
             citations_json=json.dumps(
-                [
-                    {
-                        "citation_id": citation.citation_id,
-                        "doc_id": citation.doc_id,
-                        "chunk_id": citation.chunk_id,
-                        "doc_title": citation.doc_title,
-                        "snippet": citation.snippet,
-                        "page_num": citation.page_num,
-                        "section_title": citation.section_title,
-                    }
-                    for citation in citations
-                ],
+                [_citation_payload(citation) for citation in citations],
                 ensure_ascii=False,
             ),
             retrieval_mode=mode,

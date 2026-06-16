@@ -65,6 +65,8 @@ class Citation:
     snippet: str
     page_num: int | None = None
     section_title: str | None = None
+    # chunk 对应的实体候选（按 mention_count 降序），用于前端一键聚焦图谱节点。
+    entities: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

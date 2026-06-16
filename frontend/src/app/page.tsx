@@ -52,6 +52,13 @@ type Citation = {
   snippet: string;
   page_num: number | null;
   section_title: string | null;
+  entities?: CitationEntity[];
+};
+type CitationEntity = {
+  entity_id: string;
+  label: string;
+  entity_type: string;
+  mention_count: number;
 };
 type ChatMessage = {
   role: "user" | "assistant";
@@ -314,6 +321,10 @@ export default function HomePage() {
   const [citationDetail, setCitationDetail] = useState<ChunkDetail | null>(null);
   const [loadingCitationDetail, setLoadingCitationDetail] = useState(false);
   const [citationDetailError, setCitationDetailError] = useState<string | null>(null);
+  const [pendingCitationFocus, setPendingCitationFocus] = useState<{
+    entityId: string;
+    createdAt: number;
+  } | null>(null);
   const [embeddingStatus, setEmbeddingStatus] = useState<{ mode: string; device: string } | null>(null);
   const [rerankerStatus, setRerankerStatus] = useState<{ mode: string; device: string } | null>(null);
 
@@ -558,6 +569,31 @@ export default function HomePage() {
     setCitationDetail(null);
     setCitationDetailError(null);
   }, []);
+
+  const focusCitationOnGraph = useCallback((citation: Citation) => {
+    setCanvasTab("graph");
+    setGlobalGraphView(false);
+    setGraphDocFilter(citation.doc_id);
+    setFocusDocId(citation.doc_id);
+
+    const topEntity = [...(citation.entities ?? [])].sort(
+      (a, b) => b.mention_count - a.mention_count
+    )[0];
+
+    if (!topEntity) {
+      setFocusNodeId(null);
+      toast.show({
+        kind: "info",
+        message: "已切到该文档图谱",
+        detail: "该引用未命中可聚焦实体",
+      });
+      return;
+    }
+
+    setFocusNodeId(topEntity.entity_id);
+    setPendingCitationFocus({ entityId: topEntity.entity_id, createdAt: Date.now() });
+    void loadEntityDetail(topEntity.entity_id);
+  }, [loadEntityDetail, toast]);
 
   async function ensureSession(): Promise<string> {
     // 首次发消息前创建会话，后续复用同一 session_id。
@@ -862,6 +898,16 @@ export default function HomePage() {
             const docId = typeof payload.doc_id === "string" ? payload.doc_id : "";
             const chunkId = typeof payload.chunk_id === "string" ? payload.chunk_id : "";
             if (citationId && docId && chunkId) {
+              const rawEntities = Array.isArray(payload.entities) ? payload.entities : [];
+              const entities: CitationEntity[] = rawEntities
+                .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+                .map((item) => ({
+                  entity_id: typeof item.entity_id === "string" ? item.entity_id : "",
+                  label: typeof item.label === "string" ? item.label : "",
+                  entity_type: typeof item.entity_type === "string" ? item.entity_type : "",
+                  mention_count: typeof item.mention_count === "number" ? item.mention_count : 0,
+                }))
+                .filter((item) => item.entity_id !== "");
               collectedCitations.push({
                 citation_id: citationId,
                 doc_id: docId,
@@ -872,6 +918,7 @@ export default function HomePage() {
                 page_num: typeof payload.page_num === "number" ? payload.page_num : null,
                 section_title:
                   typeof payload.section_title === "string" ? payload.section_title : null,
+                entities,
               });
             }
           } else if (eventType === "error") {
@@ -963,6 +1010,21 @@ export default function HomePage() {
   useEffect(() => {
     void refreshGraph();
   }, [refreshGraph]);
+
+  useEffect(() => {
+    if (!pendingCitationFocus || loadingGraph || !graphData) return;
+    if (Date.now() - pendingCitationFocus.createdAt < 300) return;
+    const hit = graphData.nodes.some((node) => node.id === pendingCitationFocus.entityId);
+    if (!hit) {
+      toast.show({
+        kind: "info",
+        message: "已切到该文档图谱",
+        detail: "未命中引用实体节点，已回退为文档锚定视图",
+      });
+      setFocusNodeId(null);
+    }
+    setPendingCitationFocus(null);
+  }, [graphData, loadingGraph, pendingCitationFocus, toast]);
 
   useEffect(() => {
     const anchorDoc = mindmapDocId;
@@ -1610,19 +1672,27 @@ export default function HomePage() {
                   {msg.role === "assistant" && msg.citations && msg.citations.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {msg.citations.map((cit) => (
-                        <button
-                          key={cit.citation_id}
-                          type="button"
-                          onClick={() => void openCitation(cit)}
-                          className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] text-blue-700 transition hover:border-blue-400 hover:bg-blue-100"
-                          title={cit.snippet}
-                        >
-                          <span className="font-semibold">[{cit.citation_id}]</span>
-                          <span className="max-w-[200px] truncate">{cit.doc_title}</span>
-                          {typeof cit.page_num === "number" && (
-                            <span className="text-blue-500">p.{cit.page_num}</span>
-                          )}
-                        </button>
+                        <div key={cit.citation_id} className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void openCitation(cit)}
+                            className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] text-blue-700 transition hover:border-blue-400 hover:bg-blue-100"
+                            title={cit.snippet}
+                          >
+                            <span className="font-semibold">[{cit.citation_id}]</span>
+                            <span className="max-w-[200px] truncate">{cit.doc_title}</span>
+                            {typeof cit.page_num === "number" && (
+                              <span className="text-blue-500">p.{cit.page_num}</span>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => focusCitationOnGraph(cit)}
+                            className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] text-indigo-700 transition hover:border-indigo-400 hover:bg-indigo-100"
+                          >
+                            定位图谱
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -1730,16 +1800,25 @@ export default function HomePage() {
             </div>
             <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-2 text-xs text-slate-500">
               <span>chunk_id {activeCitation.chunk_id.slice(0, 8)}…</span>
-              {citationDetail?.doc_type === "pdf" && (
-                <a
-                  href={`${API_BASE}/documents/${activeCitation.doc_id}/file`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:border-blue-400 hover:text-blue-700"
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => focusCitationOnGraph(activeCitation)}
+                  className="rounded-lg border border-indigo-300 bg-white px-2 py-1 text-indigo-700 hover:border-indigo-400 hover:bg-indigo-50"
                 >
-                  打开原 PDF
-                </a>
-              )}
+                  定位图谱
+                </button>
+                {citationDetail?.doc_type === "pdf" && (
+                  <a
+                    href={`${API_BASE}/documents/${activeCitation.doc_id}/file`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-slate-700 hover:border-blue-400 hover:text-blue-700"
+                  >
+                    打开原 PDF
+                  </a>
+                )}
+              </div>
             </div>
           </div>
         </div>
